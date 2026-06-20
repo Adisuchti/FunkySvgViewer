@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SVG Pan & Zoom — Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: monospace;
+      background: #fff;
+      color: #000;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      padding: 8px 12px;
+      background: #000;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 1rem; font-weight: bold; margin-right: auto; }
+    button {
+      padding: 4px 10px;
+      border: 2px solid #fff;
+      background: #000;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.8rem;
+      font-family: monospace;
+    }
+    button:hover { background: #fff; color: #000; }
+    #container {
+      flex: 1;
+      min-height: 0;
+      background: #ccc;
+    }
+    .info-bar {
+      padding: 4px 12px;
+      background: #000;
+      color: #fff;
+      font-size: 0.75rem;
+      display: flex;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>SVG Pan & Zoom — Pre-Rendered Tiles</h1>
+  <button id="btn-fit">Fit</button>
+  <button id="btn-zoomin">Zoom In</button>
+  <button id="btn-zoomout">Zoom Out</button>
+</header>
+
+<div id="container"></div>
+
+<div class="info-bar">
+  Center: <span id="info-center">—</span>
+  Zoom:  <span id="info-zoom">—</span>
+  Level: <span id="info-level">—</span>
+  Tiles: <span id="info-tiles">0</span>
+</div>
+
+<script type="module">
+  import { FunkySvgViewer } from './src/index.js';
+
+  const viewer = new FunkySvgViewer('#container', {
+    svg: './Altis_Map.svg',
+    preRendered: 'rasterizationData/Altis_Map/manifest.json',
+    background: '#ccc',
+  });
+
+  viewer.on('load', (d) => console.log('Loaded:', d.width, '×', d.height));
+  viewer.on('ready', () => console.log('Ready —', viewer._pyramid.numLevels, 'levels'));
+  viewer.on('move', updateInfo);
+  viewer.on('zoom', updateInfo);
+  viewer.on('tileload', () => {
+    document.getElementById('info-tiles').textContent = viewer._cache.size;
+  });
+  viewer.on('click', (ev) => {
+    console.log('Click world:', ev.worldX.toFixed(0), ev.worldY.toFixed(0));
+  });
+
+  await viewer.mount();
+
+  function updateInfo(state) {
+    document.getElementById('info-center').textContent =
+      `(${state.centerX.toFixed(0)}, ${state.centerY.toFixed(0)})`;
+    document.getElementById('info-zoom').textContent = state.zoom.toFixed(4);
+    if (viewer._pyramid) {
+      const lvl = viewer._pyramid.levelForZoom(state.zoom);
+      document.getElementById('info-level').textContent =
+        lvl + ' (' + viewer._pyramid.minLevel + '-' + viewer._pyramid.maxLevel + ')';
+    }
+    document.getElementById('info-tiles').textContent =
+      viewer._cache ? viewer._cache.size : 0;
+  }
+  updateInfo(viewer.getState());
+
+  document.getElementById('btn-fit').addEventListener('click', () => viewer.fitToViewport());
+  document.getElementById('btn-zoomin').addEventListener('click', () => {
+    viewer.zoomTo(viewer.getState().zoom / 1.5);
+  });
+  document.getElementById('btn-zoomout').addEventListener('click', () => {
+    viewer.zoomTo(viewer.getState().zoom * 1.5);
+  });
+</script>
+</body>
+</html>

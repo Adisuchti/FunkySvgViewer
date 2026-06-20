@@ -1,0 +1,38 @@
+{
+  "name": "funky-svg-viewer",
+  "version": "0.1.0",
+  "description": "FunkySvgViewer - JavaScript library to pan and zoom around any SVG with rasterized tile levels",
+  "type": "module",
+  "main": "./dist/funky-svg-viewer.cjs",
+  "module": "./dist/funky-svg-viewer.mjs",
+  "exports": {
+    ".": {
+      "import": "./dist/funky-svg-viewer.mjs",
+      "require": "./dist/funky-svg-viewer.cjs"
+    }
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "dev": "esbuild src/index.js --bundle --format=esm --outfile=dist/funky-svg-viewer.mjs --watch --sourcemap",
+    "build": "esbuild src/index.js --bundle --format=esm --outfile=dist/funky-svg-viewer.mjs --minify --sourcemap && esbuild src/index.js --bundle --format=cjs --outfile=dist/funky-svg-viewer.cjs --minify --sourcemap",
+    "demo": "esbuild src/index.js --bundle --format=iife --global-name=FunkySvgViewer --outfile=dist/funky-svg-viewer.iife.js --minify --sourcemap",
+    "serve": "npx serve . -p 3000",
+    "pre-render": "node cli/pre-render.mjs",
+    "lint": "eslint src/",
+    "format": "prettier --write \"src/**/*.js\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": ["svg", "pan", "zoom", "tile", "viewer", "canvas"],
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0",
+    "vitest": "^3.0.0",
+    "serve": "^14.0.0",
+    "sharp": "^0.34.0"
+  }
+}
