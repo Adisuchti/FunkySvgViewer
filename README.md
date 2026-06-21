@@ -1,6 +1,9 @@
+This file is AI generated. Sadly, I acknowledge that AI can be useful tool.
+
 # FunkySvgViewer
 
 A JavaScript library for displaying SVG map files with pan & zoom, using tiled multi-resolution rendering via server-pre-rendered PNG tile pyramids. Zero runtime dependencies.
+Originally used to display a games maps as SVG files.
 
 ---
 
@@ -51,38 +54,45 @@ npm run serve
 # → http://localhost:3000
 ```
 
-Alternatively, use `admin/pre-render.php` for a browser-based pre-render + upload workflow that rasterizes tiles client-side.
+Alternatively, use `admin/pre-render.php` for a browser-based pre-render + upload workflow that rasterizes tiles client-side, compares tiles against their parent quadrant, and only uploads non-identical tiles. Identical tiles are **delegated** to the parent, saving storage and bandwidth.
+
+A tile debug overlay is available at `admin/debug-tiles.html` for visualizing which tiles exist per level with color-coded grid overlays and delegation highlighting.
 
 ---
 
 ## Features
 
-| Feature | Status |
-| ------- | ------ |
-| Load SVG from URL, inline string, or `<svg>` element | ✅ |
-| Tile pyramid — multi-resolution rendering at discrete zoom levels | ✅ |
-| Lazy tile rasterization — tiles generated on demand, on first visibility | ✅ |
-| Fallback tiles — coarser-level tiles shown while finer ones load | ✅ |
-| In-memory tile cache with LRU eviction | ✅ |
-| Server-side pre-rendered PNG tiles via manifest | ✅ |
-| IndexedDB persistent tile cache | ✅ |
-| Pre-render all tiles upfront (`preRenderAll`) | ✅ |
-| Mouse drag to pan | ✅ |
-| Mouse wheel to zoom (anchored at cursor) | ✅ |
-| Touch single-finger drag + two-finger pinch zoom | ✅ |
-| Button controls (zoom in/out, fit) | ✅ |
-| Event system (`loadstart`, `load`, `ready`, `move`, `zoom`, `click`, `dblclick`, `tileload`, `tileerror`, `preloadprogress`) | ✅ |
-| SVG-world coordinates in click events | ✅ |
-| Responsive resize (ResizeObserver) | ✅ |
-| XSS sanitization (strips `<script>`, `on*` attributes) | ✅ |
-| Configurable zoom bounds, tile size, pyramid levels, and background color | ✅ |
-| `fitToViewport()`, `panTo()`, `zoomTo()` programmatic API | ✅ |
-| Zero runtime dependencies | ✅ |
+| Feature |
+| ------- |
+| Load SVG from URL, inline string, or `<svg>` element |
+| Tile pyramid — multi-resolution rendering at discrete zoom levels |
+| Lazy tile rasterization — tiles generated on demand, on first visibility |
+| Fallback tiles — coarser-level tiles shown while finer ones load |
+| In-memory tile cache with LRU eviction |
+| Server-side pre-rendered PNG tiles via manifest |
+| IndexedDB persistent tile cache |
+| Pre-render all tiles upfront (`preRenderAll`) |
+| Quadtree tile delegation — skips identical child tiles, stores delegation to parent |
+| C# parallel server-side pre-renderer (SkiaSharp) |
+| Browser-based smart pre-render + upload with delegation (admin panel) |
+| Tile debug overlay with per-level coloring (admin panel) |
+| Mouse drag to pan |
+| Mouse wheel to zoom (anchored at cursor) |
+| Touch single-finger drag + two-finger pinch zoom |
+| Button controls (zoom in/out, fit) |
+| Event system (`loadstart`, `load`, `ready`, `move`, `zoom`, `click`, `dblclick`, `tileload`, `tileerror`, `preloadprogress`) |
+| SVG-world coordinates in click events |
+| Responsive resize (ResizeObserver) |
+| XSS sanitization (strips `<script>`, `on*` attributes) |
+| Configurable zoom bounds, tile size, pyramid levels, and background color |
+| `fitToViewport()`, `panTo()`, `zoomTo()` programmatic API |
+| Zero runtime dependencies |
 
 ### Known Limitations
 
 - **No Worker rasterization** — heavy SVGs rasterize on the main thread via `requestAnimationFrame` batching. Large pyramids may cause jank during initial pre-rendering.
 - **No animated SVGs** — SMIL / CSS animations are not rendered (static raster only).
+- **Quadtree tile delegation** — identical child tiles are not stored; they reference the parent tile. This is mathematically safe: if a parent quadrant upscales pixel-perfect to the child, the child file is redundant. Delegation cascades recursively.
 - **No overlay API** — markers and custom elements on top of the SVG are planned.
 - **No TypeScript declarations** — plain JavaScript with JSDoc annotations.
 - **No inertia panning** — pan stops immediately on mouse/touch release.
@@ -151,7 +161,7 @@ new FunkySvgViewer(container: string | HTMLElement, options: Options)
 
 For large SVGs, rasterization can be done at build time on the server. Pre-rendered tiles are saved as PNGs and loaded by the client with zero client-side rasterization cost.
 
-### 1. Generate tiles
+### 1. Generate tiles (Node.js CLI)
 
 ```bash
 node cli/pre-render.mjs Altis_Map.svg \
@@ -172,6 +182,8 @@ node cli/pre-render.mjs Altis_Map.svg \
 | `--outDir=PATH` | Output base directory | `./rasterizationData` |
 | `--maxCanvasDim=N` | Browser canvas cap for auto-level calculation | `4096` |
 
+**How it works:** Each pyramid level is rasterized once (full SVG at that level's resolution), then all tiles are extracted from that single render. Each tile is compared against the upscaled parent quadrant — if pixel-identical within 0.1% tolerance, the tile is skipped and a **delegation** entry is written to the manifest. Delegation cascades: if a parent is delegated, all 4 children auto-delegate to the grandparent without any rasterization.
+
 Output structure:
 ```
 rasterizationData/<svgName>/
@@ -182,6 +194,20 @@ rasterizationData/<svgName>/
     L1-R0-C1.png
     …
 ```
+
+### 1b. Generate tiles (C# parallel pre-renderer)
+
+A faster alternative using SkiaSharp with strip-based parallel rendering is available in `cli/PreRender/`. Build with `dotnet build` and run:
+
+```bash
+dotnet run --project cli/PreRender -- Altis_Map.svg \
+  --tileSize 256 \
+  --numLevels 6 \
+  --lowestRes 4096 \
+  --outDir ./rasterizationData
+```
+
+This uses the same quadtree pruning strategy with multi-threaded tile extraction and comparison for significantly faster processing on multi-core machines.
 
 ### 2. Load pre-rendered tiles on the client
 
@@ -261,6 +287,22 @@ Zoom N: (2^N × 2^N) tiles
 ```
 
 Each level doubles the pixel density of the previous one. Levels are computed from `minLevel`, `numLevels`/`highestRes`/`lowestRes`, or auto-capped by `maxCanvasDim`.
+
+### Quadtree Tile Delegation
+
+When pre-rendering tiles, each tile is compared against the upscaled quadrant of its parent tile. If they are pixel-identical (within 0.1% tolerance), the child tile is **not saved**. Instead, a **delegation** entry is added to the manifest:
+
+```json
+{
+  "delegations": {
+    "L3-R7-C5": { "level": 2, "col": 3, "row": 2 }
+  }
+}
+```
+
+This means tile `L3-R7-C5` is identical to tile `L2-R3-C2` — the client will display the parent tile instead. Delegation **cascades**: if parent `L2-R3-C2` is also delegated to `L0-R0-C0`, all 16 tiles at level 3 under that parent are automatically delegated to `L0-R0-C0` without any pixel comparison, saving significant compute time.
+
+On the client side, `PreRenderedLoader.isDelegated()` checks the manifest before attempting to fetch a tile. The `Renderer` skips fetch for delegated tiles and uses the fallback mechanism to display the parent tile. This is mathematically correct because a nearest-neighbor upscale preserves all pixel information.
 
 ---
 

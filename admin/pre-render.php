@@ -178,6 +178,49 @@ $opts = array_filter($opts, fn($v) => $v !== null);
 <script type="module">
   import { FunkySvgViewer } from '../src/index.js';
 
+  /**
+   * Compare a child tile canvas against the upscaled quadrant
+   * of its parent tile canvas. Returns true if they are
+   * pixel-identical (within tolerance).
+   *
+   * @param {HTMLCanvasElement} childCanvas
+   * @param {HTMLCanvasElement} parentCanvas
+   * @param {number} quadCol  - 0 or 1 (which quadrant column in parent)
+   * @param {number} quadRow  - 0 or 1 (which quadrant row in parent)
+   * @param {number} tileSize
+   * @returns {boolean}
+   */
+  function compareTileToUpscaledQuadrant(childCanvas, parentCanvas, quadCol, quadRow, tileSize) {
+    // Create a canvas that upscales the parent quadrant to tileSize×tileSize
+    const upscaled = document.createElement('canvas');
+    upscaled.width = tileSize;
+    upscaled.height = tileSize;
+    const uctx = upscaled.getContext('2d');
+
+    const halfSize = tileSize / 2;
+    uctx.drawImage(
+      parentCanvas,
+      quadCol * halfSize, quadRow * halfSize, halfSize, halfSize,
+      0, 0, tileSize, tileSize
+    );
+
+    // Compare pixels
+    const childCtx = childCanvas.getContext('2d');
+    const upCtx = upscaled.getContext('2d');
+    const childData = childCtx.getImageData(0, 0, tileSize, tileSize).data;
+    const upData = upCtx.getImageData(0, 0, tileSize, tileSize).data;
+
+    let diffCount = 0;
+    const maxDiffs = childData.length * 0.001; // 0.1% tolerance
+    for (let i = 0; i < childData.length; i++) {
+      if (childData[i] !== upData[i]) {
+        diffCount++;
+        if (diffCount > maxDiffs) return false;
+      }
+    }
+    return true;
+  }
+
   const svgName     = <?php echo json_encode($svgName); ?>;
   const serverReady = <?php echo json_encode($serverReady); ?>;
   const progressSec = document.getElementById('progress-section');
@@ -220,22 +263,71 @@ $opts = array_filter($opts, fn($v) => $v !== null);
     });
 
     viewer.on('ready', async () => {
-      heading.textContent = 'Uploading tiles to server…';
+      heading.textContent = 'Comparing & uploading tiles to server…';
       tilesLabel.textContent = '';
 
       const tileCount = viewer._pyramid.totalTiles();
       let uploaded = 0;
+      let skipped = 0;
+      const delegations = {};
+      // Set of delegated tile keys for cascading to children
+      const delegatedSet = new Set();
 
+      // ── Smart: compare each tile against upscaled parent quadrant, with cascade ──
       for (let lvl = viewer._pyramid.minLevel; lvl <= viewer._pyramid.maxLevel; lvl++) {
         const cols = viewer._pyramid.colsAt(lvl);
         const rows = viewer._pyramid.rowsAt(lvl);
         for (let row = 0; row < rows; row++) {
           for (let col = 0; col < cols; col++) {
+            const key = `L${lvl}-R${row}-C${col}`;
+
+            // ── Cascade delegation: if parent is delegated, child is auto-delegated ──
+            if (lvl > viewer._pyramid.minLevel) {
+              const parentKey = `L${lvl - 1}-R${Math.floor(row / 2)}-C${Math.floor(col / 2)}`;
+              if (delegatedSet.has(parentKey)) {
+                delegations[key] = {
+                  level: delegations[parentKey].level,
+                  col: delegations[parentKey].col,
+                  row: delegations[parentKey].row,
+                };
+                delegatedSet.add(key);
+                skipped++;
+                continue;
+              }
+            }
+
             const canvas = viewer._cache.getSync
               ? viewer._cache.getSync(lvl, col, row)
               : viewer._cache.get(lvl, col, row);
             if (!canvas || canvas instanceof Promise) continue;
 
+            // ── Smart comparison: check if identical to parent quadrant ──
+            if (lvl > viewer._pyramid.minLevel) {
+              const parentLevel = lvl - 1;
+              const parentCol = Math.floor(col / 2);
+              const parentRow = Math.floor(row / 2);
+              const parentCanvas = viewer._cache.getSync
+                ? viewer._cache.getSync(parentLevel, parentCol, parentRow)
+                : viewer._cache.get(parentLevel, parentCol, parentRow);
+
+              if (parentCanvas && !(parentCanvas instanceof Promise)) {
+                const identical = compareTileToUpscaledQuadrant(
+                  canvas, parentCanvas, col % 2, row % 2, viewer._pyramid.tileSize
+                );
+                if (identical) {
+                  delegations[key] = {
+                    level: parentLevel,
+                    col: parentCol,
+                    row: parentRow,
+                  };
+                  delegatedSet.add(key);
+                  skipped++;
+                  continue;
+                }
+              }
+            }
+
+            // ── Upload tile to server ──
             const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
             if (!blob) continue;
 
@@ -251,10 +343,10 @@ $opts = array_filter($opts, fn($v) => $v !== null);
             } catch (e) { /* retry? */ }
 
             uploaded++;
-            const pct = Math.round((uploaded / tileCount) * 100);
+            const pct = Math.round(((uploaded + skipped) / tileCount) * 100);
             barFill.style.width = pct + '%';
             pctLabel.textContent = pct + '%';
-            uploadLabel.textContent = `Uploaded ${uploaded} / ${tileCount} tiles`;
+            uploadLabel.textContent = `Uploaded ${uploaded} / ${tileCount} tiles (${skipped} skipped)`;
           }
         }
       }
@@ -268,7 +360,10 @@ $opts = array_filter($opts, fn($v) => $v !== null);
         maxLevel: viewer._pyramid.maxLevel,
         numLevels: viewer._pyramid.numLevels,
         totalTiles: tileCount,
+        actualTileCount: uploaded,
+        delegationCount: skipped,
         tileFormat: 'png',
+        delegations,
       };
 
       await fetch('save-tiles.php?manifest=1', {
@@ -278,7 +373,7 @@ $opts = array_filter($opts, fn($v) => $v !== null);
       });
 
       heading.textContent = 'Done! Tiles saved to server.';
-      uploadLabel.textContent = 'Reload the page to load from server tiles.';
+      uploadLabel.textContent = `${uploaded} uploaded, ${skipped} skipped. Reload the page to load from server tiles.`;
       progressSec.style.display = 'none';
       viewerSec.style.display = 'block';
     });

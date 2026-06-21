@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Tile Debug — Solid Color Overlay</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      font-family: monospace;
+      background: #1a1a1a;
+      color: #eee;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    #toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 8px 16px;
+      background: #2a2a2a;
+      border-bottom: 1px solid #444;
+      flex-wrap: wrap;
+    }
+    #toolbar h1 { font-size: 1rem; margin-right: 16px; white-space: nowrap; }
+    #toolbar button, #toolbar select {
+      padding: 4px 12px;
+      border: 1px solid #666;
+      background: #333;
+      color: #eee;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 0.8rem;
+    }
+    #toolbar button:hover, #toolbar select:hover { background: #444; }
+    #toolbar label { font-size: 0.8rem; display: flex; align-items: center; gap: 4px; }
+    #toolbar input[type="checkbox"] { accent-color: #0af; }
+    #toolbar input[type="range"] { width: 80px; }
+    #stats {
+      display: flex;
+      gap: 16px;
+      padding: 6px 16px;
+      background: #222;
+      border-bottom: 1px solid #333;
+      font-size: 0.75rem;
+      flex-wrap: wrap;
+      min-height: 28px;
+      align-items: center;
+    }
+    #main {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      cursor: grab;
+    }
+    #main.grabbing { cursor: grabbing; }
+    #viewer {
+      width: 100%; height: 100%;
+      position: absolute; top: 0; left: 0;
+    }
+    #overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 10;
+    }
+    #legend {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      background: rgba(0,0,0,0.85);
+      border: 1px solid #444;
+      padding: 10px 14px;
+      font-size: 0.72rem;
+      z-index: 20;
+      border-radius: 4px;
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+    #legend .level-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 3px 0;
+    }
+    #legend .level-color {
+      width: 20px; height: 14px;
+      border-radius: 2px;
+    }
+    #legend .level-color.delegated {
+      opacity: 0.3;
+      background-image: repeating-linear-gradient(
+        -45deg, transparent, transparent 3px, rgba(255,255,255,0.15) 3px, rgba(255,255,255,0.15) 6px
+      );
+    }
+    #overlay-tooltip {
+      position: absolute;
+      background: rgba(0,0,0,0.9);
+      border: 1px solid #555;
+      padding: 4px 8px;
+      font-size: 0.7rem;
+      pointer-events: none;
+      z-index: 25;
+      display: none;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+
+<div id="toolbar">
+  <h1>🔍 Tile Pyramid Debug</h1>
+  <label><input type="checkbox" id="showOverlay" checked /> Overlay</label>
+  <label>
+    Level:
+    <input type="range" id="levelSlider" min="0" max="0" value="0" style="width:120px" />
+    <span id="levelLabel">All</span>
+  </label>
+  <label><input type="checkbox" id="showDelegated" checked /> Delegated</label>
+  <label>
+    Opacity: <input type="range" id="opacitySlider" min="10" max="90" value="45" />
+    <span id="opacityVal">45</span>%
+  </label>
+  <button id="btnFit">Fit View</button>
+  <select id="manifestSelect">
+    <option value="">Loading…</option>
+  </select>
+</div>
+
+<div id="stats">
+  <span>Loading tile data…</span>
+</div>
+
+<div id="main">
+  <div id="viewer"></div>
+  <canvas id="overlay"></canvas>
+  <div id="overlay-tooltip"></div>
+  <div id="legend"></div>
+</div>
+
+<script type="module">
+  import { FunkySvgViewer } from '../src/index.js';
+
+  // ── Level colors (bright, distinct) ────────────────────────────
+  const LEVEL_COLORS = [
+    '#ff4466',  // L0 — Pink-red
+    '#ff8844',  // L1 — Orange
+    '#ffcc22',  // L2 — Yellow
+    '#44dd44',  // L3 — Green
+    '#22ddcc',  // L4 — Teal
+    '#4499ff',  // L5 — Blue
+    '#8844ff',  // L6 — Purple
+    '#dd44dd',  // L7 — Magenta
+    '#ff6666',  // L8 — Salmon
+    '#66ff66',  // L9 — Lime
+    '#888888',  // L10+ — Grey
+  ];
+
+  function levelColor(level) {
+    return LEVEL_COLORS[level % LEVEL_COLORS.length];
+  }
+
+  // ── DOM refs ───────────────────────────────────────────────────
+  const mainEl      = document.getElementById('main');
+  const viewerDiv   = document.getElementById('viewer');
+  const overlayCv   = document.getElementById('overlay');
+  const ctx         = overlayCv.getContext('2d');
+  const legendDiv   = document.getElementById('legend');
+  const statsDiv    = document.getElementById('stats');
+  const tooltip     = document.getElementById('overlay-tooltip');
+  const levelSlider = document.getElementById('levelSlider');
+  const levelLabel  = document.getElementById('levelLabel');
+  const opacitySlider = document.getElementById('opacitySlider');
+  const opacityVal   = document.getElementById('opacityVal');
+  const manifestSelect = document.getElementById('manifestSelect');
+  const cbOverlay   = document.getElementById('showOverlay');
+  const cbDelegated = document.getElementById('showDelegated');
+
+  let viewer = null;
+  let manifest = null;
+  let showSpecificLevel = -1;
+  let currentViewport = null;
+
+  // ── Load manifest list ─────────────────────────────────────────
+  async function loadManifestList() {
+    try {
+      const resp = await fetch('list-manifests.php');
+      if (resp.ok) {
+        const list = await resp.json();
+        manifestSelect.innerHTML = list.map(m =>
+          `<option value="${m.path}">${m.name} (${m.levels} levels)</option>`
+        ).join('');
+        if (list.length > 0) manifestSelect.value = list[0].path;
+      } else {
+        manifestSelect.innerHTML =
+          `<option value="../rasterizationData/Altis_Map/manifest.json">Altis_Map</option>`;
+        manifestSelect.value = "../rasterizationData/Altis_Map/manifest.json";
+      }
+    } catch {
+      manifestSelect.innerHTML =
+        `<option value="../rasterizationData/Altis_Map/manifest.json">Altis_Map</option>`;
+      manifestSelect.value = "../rasterizationData/Altis_Map/manifest.json";
+    }
+  }
+
+  async function loadSelectedManifest() {
+    const url = manifestSelect.value;
+    try {
+      const resp = await fetch(url);
+      manifest = await resp.json();
+      return manifest;
+    } catch (err) {
+      console.error('Failed to load manifest:', err);
+      return null;
+    }
+  }
+
+  // ── Initialize viewer ──────────────────────────────────────────
+  async function initViewer(manifest) {
+    if (viewer) {
+      viewer.destroy();
+      viewerDiv.innerHTML = '';
+    }
+
+    const svgName = manifest.svgName;
+    const svgFile = svgName + '.svg';
+
+    viewer = new FunkySvgViewer('#viewer', {
+      svg: svgFile,
+      preRendered: {
+        manifestUrl: manifestSelect.value,
+        baseUrl: manifestSelect.value.replace(/manifest\.json$/, ''),
+      },
+      background: '#0d0d0d',
+      cacheBackend: 'memory',
+    });
+
+    window._viewer = viewer;
+
+    viewer.on('move', (state) => { currentViewport = state; drawOverlay(); });
+    viewer.on('zoom', (state) => { currentViewport = state; drawOverlay(); });
+    viewer.on('tileload', () => { requestAnimationFrame(() => drawOverlay()); });
+
+    await viewer.mount();
+    currentViewport = viewer.getState();
+
+    levelSlider.min = manifest.minLevel;
+    levelSlider.max = manifest.maxLevel;
+    levelSlider.value = -1;
+    showSpecificLevel = -1;
+    updateLevelLabel();
+
+    buildLegend(manifest);
+    updateStats(manifest);
+    resizeOverlay();
+    drawOverlay();
+
+    return viewer;
+  }
+
+  // ── Legend ─────────────────────────────────────────────────────
+  function buildLegend(manifest) {
+    let html = '<div style="font-weight:bold;margin-bottom:6px;">Level (rendered / delegated)</div>';
+    for (let lvl = manifest.minLevel; lvl <= manifest.maxLevel; lvl++) {
+      const cols = 1 << lvl;
+      const rows = 1 << lvl;
+      const total = cols * rows;
+      let existing = total;
+      if (manifest.delegations) {
+        for (let r = 0; r < rows; r++)
+          for (let c = 0; c < cols; c++)
+            if (manifest.delegations[`L${lvl}-R${r}-C${c}`]) existing--;
+      }
+      const delegated = total - existing;
+      const c = levelColor(lvl);
+      html += `<div class="level-row">
+        <div class="level-color" style="background:${c};"></div>
+        ${delegated > 0 ? `<div class="level-color delegated" style="background:${c};"></div>` : `<div class="level-color" style="opacity:0;"></div>`}
+        <span>L${lvl}: ${existing} / ${delegated} del.</span>
+      </div>`;
+    }
+    legendDiv.innerHTML = html;
+  }
+
+  function updateStats(manifest) {
+    let totalTiles = 0, totalDelegated = 0;
+    for (let lvl = manifest.minLevel; lvl <= manifest.maxLevel; lvl++) {
+      const total = (1 << lvl) * (1 << lvl);
+      totalTiles += total;
+      if (manifest.delegations) {
+        for (let r = 0; r < (1 << lvl); r++)
+          for (let c = 0; c < (1 << lvl); c++)
+            if (manifest.delegations[`L${lvl}-R${r}-C${c}`]) totalDelegated++;
+      }
+    }
+    const pct = totalTiles > 0 ? ((totalDelegated / totalTiles) * 100).toFixed(1) : 0;
+    statsDiv.innerHTML = `
+      <span>SVG: ${manifest.svgWidth}×${manifest.svgHeight}</span>
+      <span>Tile: ${manifest.tileSize}px</span>
+      <span>Levels: ${manifest.minLevel}–${manifest.maxLevel} (${manifest.numLevels})</span>
+      <span>Total: ${totalTiles.toLocaleString()} tiles</span>
+      <span>Rendered: ${(totalTiles - totalDelegated).toLocaleString()}</span>
+      <span style="color:#f88;">Delegated: ${totalDelegated.toLocaleString()} (${pct}%)</span>
+    `;
+  }
+
+  // ── Overlay drawing ────────────────────────────────────────────
+  function resizeOverlay() {
+    const rect = mainEl.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    overlayCv.width = rect.width * dpr;
+    overlayCv.height = rect.height * dpr;
+    overlayCv.style.width = rect.width + 'px';
+    overlayCv.style.height = rect.height + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function drawOverlay() {
+    const w = mainEl.getBoundingClientRect().width;
+    const h = mainEl.getBoundingClientRect().height;
+
+    if (!cbOverlay.checked) {
+      ctx.clearRect(0, 0, w, h);
+      return;
+    }
+
+    if (!manifest || !viewer || !currentViewport) return;
+
+    ctx.clearRect(0, 0, w, h);
+
+    const vp = currentViewport;
+    const baseOpacity = parseInt(opacitySlider.value) / 100;
+    const zoom = vp.zoom;
+    const cx = vp.centerX;
+    const cy = vp.centerY;
+
+    const startLevel = showSpecificLevel >= 0 ? showSpecificLevel : manifest.minLevel;
+    const endLevel   = showSpecificLevel >= 0 ? showSpecificLevel : manifest.maxLevel;
+
+    // Draw from FINE to COARSE so finer tiles paint on top
+    for (let lvl = endLevel; lvl >= startLevel; lvl--) {
+      if (lvl < manifest.minLevel || lvl > manifest.maxLevel) continue;
+
+      const cols = 1 << lvl;
+      const rows = 1 << lvl;
+      const tw = manifest.svgWidth / cols;
+      const th = manifest.svgHeight / rows;
+      const color = levelColor(lvl);
+
+      const halfWorldW = (w / 2) * zoom;
+      const halfWorldH = (h / 2) * zoom;
+
+      const colStart = Math.max(0, Math.floor((cx - halfWorldW) / tw));
+      const colEnd   = Math.min(cols - 1, Math.floor((cx + halfWorldW) / tw));
+      const rowStart = Math.max(0, Math.floor((cy - halfWorldH) / th));
+      const rowEnd   = Math.min(rows - 1, Math.floor((cy + halfWorldH) / th));
+
+      const visibleCount = (colEnd - colStart + 1) * (rowEnd - rowStart + 1);
+      if (visibleCount > 5000) continue; // too many tiles for this zoom
+      if (colEnd < colStart || rowEnd < rowStart) continue;
+
+      for (let row = rowStart; row <= rowEnd; row++) {
+        for (let col = colStart; col <= colEnd; col++) {
+          const worldX = col * tw;
+          const worldY = row * th;
+
+          // Screen coords
+          const sx = (worldX - cx) / zoom + w / 2;
+          const sy = (worldY - cy) / zoom + h / 2;
+          const sw = tw / zoom;
+          const sh = th / zoom;
+
+          if (sw < 2 || sh < 2) continue;  // too small to see
+
+          const key = `L${lvl}-R${row}-C${col}`;
+          const isDelegated = manifest.delegations && manifest.delegations[key];
+
+          if (isDelegated) {
+            if (!cbDelegated.checked) continue;
+            // Delegated tile — hatched pattern with lower opacity
+            ctx.fillStyle = color;
+            ctx.globalAlpha = baseOpacity * 0.3;
+            ctx.fillRect(sx, sy, sw, sh);
+
+            // Diagonal hatch overlay
+            ctx.strokeStyle = color;
+            ctx.globalAlpha = baseOpacity * 0.5;
+            ctx.lineWidth = Math.max(0.5, sw > 30 ? 1 : 0.5);
+            ctx.save();
+            ctx.beginPath();
+            const step = Math.max(6, Math.min(20, sw * 0.3));
+            ctx.setLineDash([step, step]);
+            for (let ox = -sw; ox < sw * 2; ox += step * 2) {
+              ctx.moveTo(sx + ox, sy);
+              ctx.lineTo(sx, sy + ox);
+            }
+            ctx.stroke();
+            ctx.restore();
+          } else {
+            // Rendered tile — solid fill
+            ctx.fillStyle = color;
+            ctx.globalAlpha = baseOpacity * 0.6;
+            ctx.fillRect(sx, sy, sw, sh);
+
+            // Subtle border
+            ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+            ctx.globalAlpha = baseOpacity * 0.4;
+            ctx.lineWidth = Math.max(0.5, sw > 50 ? 1 : 0.5);
+            ctx.strokeRect(sx, sy, sw, sh);
+
+            // Level label on large enough tiles
+            if (sw > 50 && sh > 30) {
+              ctx.fillStyle = '#fff';
+              ctx.globalAlpha = 0.9;
+              ctx.font = `bold ${Math.max(9, Math.min(16, sw * 0.2))}px monospace`;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(`L${lvl}`, sx + sw / 2, sy + sh / 2);
+            }
+          }
+        }
+      }
+    }
+    ctx.globalAlpha = 1; // reset
+  }
+
+  // ── Event handlers ─────────────────────────────────────────────
+  function updateLevelLabel() {
+    if (showSpecificLevel < 0) {
+      levelLabel.textContent = 'All';
+      levelSlider.value = -1;
+    } else {
+      levelLabel.textContent = `L${showSpecificLevel}`;
+      levelSlider.value = showSpecificLevel;
+    }
+  }
+
+  levelSlider.addEventListener('input', () => {
+    const val = parseInt(levelSlider.value);
+    showSpecificLevel = (val < manifest.minLevel) ? -1 : val;
+    updateLevelLabel();
+    drawOverlay();
+  });
+
+  opacitySlider.addEventListener('input', () => {
+    opacityVal.textContent = opacitySlider.value;
+    drawOverlay();
+  });
+
+  cbOverlay.addEventListener('change', drawOverlay);
+  cbDelegated.addEventListener('change', drawOverlay);
+
+  document.getElementById('btnFit').addEventListener('click', () => {
+    if (viewer) viewer.fitToViewport();
+  });
+
+  manifestSelect.addEventListener('change', async () => {
+    const m = await loadSelectedManifest();
+    if (m) await initViewer(m);
+  });
+
+  window.addEventListener('resize', () => {
+    resizeOverlay();
+    drawOverlay();
+  });
+
+  // ── Zoom on overlay with mouse wheel ───────────────────────────
+  overlayCv.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (!viewer) return;
+    const state = viewer.getState();
+    const factor = e.deltaY < 0 ? 0.8 : 1.25; // invert: scroll up = zoom in
+    const newZoom = Math.max(0.001, Math.min(500, state.zoom * factor));
+
+    // Zoom toward mouse position
+    const rect = overlayCv.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const worldX = state.centerX + (mx - rect.width / 2) * state.zoom;
+    const worldY = state.centerY + (my - rect.height / 2) * state.zoom;
+    const newCx = worldX - (mx - rect.width / 2) * newZoom;
+    const newCy = worldY - (my - rect.height / 2) * newZoom;
+
+    viewer.panTo(newCx, newCy);
+    viewer.zoomTo(newZoom);
+  });
+
+  // ── Pan on overlay with mouse drag ─────────────────────────────
+  let panning = false;
+  let panStartX = 0, panStartY = 0;
+  let panStartCx = 0, panStartCy = 0;
+
+  overlayCv.addEventListener('pointerdown', (e) => {
+    if (!viewer) return;
+    panning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    const state = viewer.getState();
+    panStartCx = state.centerX;
+    panStartCy = state.centerY;
+    mainEl.classList.add('grabbing');
+    overlayCv.setPointerCapture(e.pointerId);
+  });
+
+  overlayCv.addEventListener('pointermove', (e) => {
+    if (!panning || !viewer) return;
+    const dx = e.clientX - panStartX;
+    const dy = e.clientY - panStartY;
+    const zoom = viewer.getState().zoom;
+    viewer.panTo(panStartCx - dx * zoom, panStartCy - dy * zoom);
+  });
+
+  overlayCv.addEventListener('pointerup', () => {
+    panning = false;
+    mainEl.classList.remove('grabbing');
+  });
+
+  overlayCv.addEventListener('pointerleave', () => {
+    panning = false;
+    mainEl.classList.remove('grabbing');
+  });
+
+  // ── Tile hover tooltip ─────────────────────────────────────────
+  overlayCv.addEventListener('pointermove', (e) => {
+    if (!manifest || !viewer || !currentViewport || !cbOverlay.checked) {
+      tooltip.style.display = 'none';
+      return;
+    }
+
+    const rect = overlayCv.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const vp = currentViewport;
+    const worldX = vp.centerX + (mx - rect.width / 2) * vp.zoom;
+    const worldY = vp.centerY + (my - rect.height / 2) * vp.zoom;
+
+    // Find the finest level tile under cursor
+    let found = null;
+    for (let lvl = manifest.maxLevel; lvl >= manifest.minLevel; lvl--) {
+      const cols = 1 << lvl;
+      const tw = manifest.svgWidth / cols;
+      const th = manifest.svgHeight / cols; // square pyramid: rows = cols
+      const col = Math.floor(worldX / tw);
+      const row = Math.floor(worldY / th);
+      if (col < 0 || col >= cols || row < 0 || row >= cols) continue;
+      const key = `L${lvl}-R${row}-C${col}`;
+      const isDelegated = manifest.delegations && manifest.delegations[key];
+      found = { lvl, col, row, key, isDelegated };
+      break;
+    }
+
+    if (found) {
+      const { lvl, col, row, key, isDelegated } = found;
+      const color = levelColor(lvl);
+      tooltip.innerHTML = `
+        <span style="color:${color};">■ L${lvl}</span>
+        &nbsp;(${col},${row})
+        ${isDelegated ? ' <span style="color:#f66;">delegated → ' +
+          `L${manifest.delegations[key].level}(${manifest.delegations[key].col},${manifest.delegations[key].row})</span>` : ''}
+      `;
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX - mainEl.getBoundingClientRect().left + 14) + 'px';
+      tooltip.style.top = (e.clientY - mainEl.getBoundingClientRect().top + 14) + 'px';
+    } else {
+      tooltip.style.display = 'none';
+    }
+  });
+
+  // ── Bootstrap ──────────────────────────────────────────────────
+  async function boot() {
+    await loadManifestList();
+    let m = null;
+    const selectedUrl = manifestSelect.value;
+    if (selectedUrl) {
+      try {
+        const resp = await fetch(selectedUrl);
+        if (resp.ok) m = await resp.json();
+      } catch {}
+    }
+    if (!m) {
+      m = {
+        svgName: 'Altis_Map', svgWidth: 30720, svgHeight: 30720, tileSize: 256,
+        minLevel: 0, maxLevel: 7, numLevels: 8,
+        totalTiles: 87381, tileFormat: 'png', delegations: {},
+      };
+    }
+    manifest = m;
+    await initViewer(manifest);
+  }
+
+  boot().catch(err => {
+    console.error('Debug page bootstrap failed:', err);
+    statsDiv.innerHTML = `<span style="color:#f44;">Error: ${err.message}. Make sure the SVG file exists and the server is running.</span>`;
+  });
+</script>
+</body>
+</html>

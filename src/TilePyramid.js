@@ -151,4 +151,25 @@ export class TilePyramid {
     }
     return tiles;
   }
+
+  /**
+   * Returns the parent tile coordinates for a given tile.
+   * The parent is at level-1, covering a 2×2 area, so its (col,row) are
+   * floor(childCol/2), floor(childRow/2).
+   *
+   * Returns null if the tile is at minLevel (no parent).
+   *
+   * @param {number} level
+   * @param {number} col
+   * @param {number} row
+   * @returns {{level: number, col: number, row: number}|null}
+   */
+  parentOf(level, col, row) {
+    if (level <= this.minLevel) return null;
+    return {
+      level: level - 1,
+      col: Math.floor(col / 2),
+      row: Math.floor(row / 2),
+    };
+  }
 }

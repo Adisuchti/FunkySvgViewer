@@ -99,6 +99,13 @@ export class Renderer {
    * Draw a tile (or load from server / rasterize), with fallback.
    */
   _drawOrLoad(level, col, row) {
+    // Check if this tile is known-delegated (server-side optimization)
+    if (this._preRenderedLoader && this._preRenderedLoader.isDelegated(level, col, row)) {
+      // Delegated tile — skip any load attempt, go straight to fallback
+      this._drawFallback(level, col, row);
+      return;
+    }
+
     // Sync cache hit?
     const hasResult = this.cache.has(level, col, row);
     if (hasResult === true) {
@@ -117,6 +124,13 @@ export class Renderer {
     }
 
     // Fallback: walk up the pyramid looking for a sync memory hit
+    this._drawFallback(level, col, row);
+  }
+
+  /**
+   * Walk up the pyramid to find and draw a coarser fallback tile.
+   */
+  _drawFallback(level, col, row) {
     let bestLevel = level;
     let bestCol = col;
     let bestRow = row;
@@ -130,7 +144,7 @@ export class Renderer {
           : this.cache.get(bestLevel, bestCol, bestRow);
         if (fbCanvas && !(fbCanvas instanceof Promise)) {
           this._blitFallback(fbCanvas, bestLevel, bestCol, bestRow, level, col, row);
-          break;
+          return;
         }
       }
       bestLevel--;
@@ -147,7 +161,13 @@ export class Renderer {
 
     try {
       const canvas = await this._preRenderedLoader.loadTile(level, col, row);
-      this.cache.set(level, col, row, canvas);
+      if (canvas === null) {
+        // Tile is delegated to a parent level — cache null as sentinel
+        // so we don't retry it, and the fallback will handle rendering.
+        this.cache.set(level, col, row, null);
+      } else {
+        this.cache.set(level, col, row, canvas);
+      }
       this.events.emit('tileload', { level, col, row });
     } catch (err) {
       this.events.emit('tileerror', { level, col, row, error: err });

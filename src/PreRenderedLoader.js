@@ -41,13 +41,32 @@ export class PreRenderedLoader {
   }
 
   /**
-   * Load a specific tile as an HTMLCanvasElement.
+   * Check if a tile is delegated to a parent level.
    * @param {number} level
    * @param {number} col
    * @param {number} row
-   * @returns {Promise<HTMLCanvasElement>}
+   * @returns {{ level: number, col: number, row: number }|null}
+   */
+  isDelegated(level, col, row) {
+    if (!this._manifest || !this._manifest.delegations) return null;
+    const key = `L${level}-R${row}-C${col}`;
+    return this._manifest.delegations[key] || null;
+  }
+
+  /**
+   * Load a specific tile as an HTMLCanvasElement.
+   * Returns null if the tile is delegated to a parent level.
+   * @param {number} level
+   * @param {number} col
+   * @param {number} row
+   * @returns {Promise<HTMLCanvasElement|null>}
    */
   async loadTile(level, col, row) {
+    // Check if this tile is delegated to a parent — don't even try to fetch
+    if (this.isDelegated(level, col, row)) {
+      return null;
+    }
+
     const fmt = this._manifest.tileFormat || 'png';
     const url = `${this._baseUrl}tiles/L${level}-R${row}-C${col}.${fmt}`;
 

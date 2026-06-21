@@ -1,8 +1,18 @@
 node_modules/
 *.log
+*.svg
+
+# Build output
+dist/
+*.map
 
 # Server-pre-rendered tile output
 rasterizationData/
+
+# .NET build artifacts
+bin/
+obj/
+*.dll
 
 # IDE / Editor
 .vscode/
@@ -14,3 +24,10 @@ rasterizationData/
 # OS
 .DS_Store
 Thumbs.db
+
+# Environment
+.env
+.env.*
+
+# Test coverage
+coverage/
