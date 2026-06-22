@@ -55,6 +55,9 @@
 
 <header>
   <h1>SVG Pan & Zoom — Pre-Rendered Tiles</h1>
+  <select id="mapSelect" style="padding:4px 8px;border:2px solid #fff;background:#000;color:#fff;font-family:monospace;font-size:0.8rem;cursor:pointer;">
+    <option value="">Loading…</option>
+  </select>
   <button id="btn-fit">Fit</button>
   <button id="btn-zoomin">Zoom In</button>
   <button id="btn-zoomout">Zoom Out</button>
@@ -72,26 +75,75 @@
 <script type="module">
   import { FunkySvgViewer } from './src/index.js';
 
-  const viewer = new FunkySvgViewer('#container', {
-    svg: './Altis_Map.svg',
-    preRendered: 'rasterizationData/Altis_Map/manifest.json',
-    background: '#ccc',
-  });
+  const mapSelect = document.getElementById('mapSelect');
+  let viewer = null;
 
-  viewer.on('load', (d) => console.log('Loaded:', d.width, '×', d.height));
-  viewer.on('ready', () => console.log('Ready —', viewer._pyramid.numLevels, 'levels'));
-  viewer.on('move', updateInfo);
-  viewer.on('zoom', updateInfo);
-  viewer.on('tileload', () => {
-    document.getElementById('info-tiles').textContent = viewer._cache.size;
-  });
-  viewer.on('click', (ev) => {
-    console.log('Click world:', ev.worldX.toFixed(0), ev.worldY.toFixed(0));
-  });
+  // ── Load available manifests via the server-side script ─────────
+  async function loadManifestList() {
+    try {
+      const resp = await fetch('admin/list-manifests.php');
+      if (resp.ok) {
+        const list = await resp.json();
+        mapSelect.innerHTML = list.map(m => {
+          // PHP returns paths relative to admin/ (e.g. ../rasterizationData/...)
+          // Strip the leading ../ so they resolve correctly from root
+          const path = m.path.startsWith('../') ? m.path.slice(3) : m.path;
+          return `<option value="${path}" data-svg="${m.name}">${m.name} (${m.levels} levels)</option>`;
+        }).join('');
+        if (list.length > 0) {
+          const first = list[0].path.startsWith('../') ? list[0].path.slice(3) : list[0].path;
+          mapSelect.value = first;
+        }
+      }
+    } catch {
+      // Fallback to hardcoded entries
+      mapSelect.innerHTML = `
+        <option value="rasterizationData/Altis_Map/manifest.json" data-svg="Altis_Map">Altis_Map</option>
+        <option value="rasterizationData/Altis_Map_No_Lines/manifest.json" data-svg="Altis_Map_No_Lines">Altis_Map_No_Lines</option>
+      `;
+      mapSelect.value = "rasterizationData/Altis_Map/manifest.json";
+    }
+  }
 
-  await viewer.mount();
+  // ── Initialize viewer with the selected manifest ────────────────
+  async function initViewer() {
+    const selectedOption = mapSelect.selectedOptions[0];
+    const manifestUrl = mapSelect.value;
+    const svgName = selectedOption ? selectedOption.dataset.svg : 'Altis_Map';
+    const baseUrl = manifestUrl.replace(/manifest\.json$/, '');
 
+    if (viewer) {
+      viewer.destroy();
+      viewer = null;
+    }
+
+    viewer = new FunkySvgViewer('#container', {
+      svg: svgName + '.svg',
+      preRendered: {
+        manifestUrl: manifestUrl,
+        baseUrl: baseUrl,
+      },
+      background: '#ccc',
+    });
+
+    viewer.on('load', (d) => console.log('Loaded:', d.width, '×', d.height));
+    viewer.on('ready', () => console.log('Ready —', viewer._pyramid.numLevels, 'levels'));
+    viewer.on('move', updateInfo);
+    viewer.on('zoom', updateInfo);
+    viewer.on('tileload', () => {
+      document.getElementById('info-tiles').textContent = viewer._cache.size;
+    });
+    viewer.on('click', (ev) => {
+      console.log('Click world:', ev.worldX.toFixed(0), ev.worldY.toFixed(0));
+    });
+
+    await viewer.mount();
+    updateInfo(viewer.getState());
+  }
+
+  // ── Info bar updates ───────────────────────────────────────────
   function updateInfo(state) {
+    if (!state) return;
     document.getElementById('info-center').textContent =
       `(${state.centerX.toFixed(0)}, ${state.centerY.toFixed(0)})`;
     document.getElementById('info-zoom').textContent = state.zoom.toFixed(4);
@@ -103,15 +155,25 @@
     document.getElementById('info-tiles').textContent =
       viewer._cache ? viewer._cache.size : 0;
   }
-  updateInfo(viewer.getState());
 
-  document.getElementById('btn-fit').addEventListener('click', () => viewer.fitToViewport());
+  // ── Event handlers ─────────────────────────────────────────────
+  document.getElementById('btn-fit').addEventListener('click', () => {
+    if (viewer) viewer.fitToViewport();
+  });
   document.getElementById('btn-zoomin').addEventListener('click', () => {
-    viewer.zoomTo(viewer.getState().zoom / 1.5);
+    if (viewer) viewer.zoomTo(viewer.getState().zoom / 1.5);
   });
   document.getElementById('btn-zoomout').addEventListener('click', () => {
-    viewer.zoomTo(viewer.getState().zoom * 1.5);
+    if (viewer) viewer.zoomTo(viewer.getState().zoom * 1.5);
   });
+
+  mapSelect.addEventListener('change', async () => {
+    await initViewer();
+  });
+
+  // ── Bootstrap ──────────────────────────────────────────────────
+  await loadManifestList();
+  await initViewer();
 </script>
 </body>
 </html>

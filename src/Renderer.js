@@ -101,7 +101,29 @@ export class Renderer {
   _drawOrLoad(level, col, row) {
     // Check if this tile is known-delegated (server-side optimization)
     if (this._preRenderedLoader && this._preRenderedLoader.isDelegated(level, col, row)) {
-      // Delegated tile — skip any load attempt, go straight to fallback
+      const delegation = this._preRenderedLoader.isDelegated(level, col, row);
+      const pLevel = delegation.level;
+      const pCol = delegation.col;
+      const pRow = delegation.row;
+
+      // Check if the explicitly-delegated parent tile is already cached
+      const hasParent = this.cache.has(pLevel, pCol, pRow);
+      if (hasParent === true) {
+        const parentCanvas = this.cache.has(pLevel, pCol, pRow)
+          ? (this.cache.getSync
+              ? this.cache.getSync(pLevel, pCol, pRow)
+              : this.cache.get(pLevel, pCol, pRow))
+          : null;
+        if (parentCanvas && !(parentCanvas instanceof Promise)) {
+          this._blitFallback(parentCanvas, pLevel, pCol, pRow, level, col, row);
+          return;
+        }
+      }
+
+      // Trigger loading of the delegated parent tile so it becomes available
+      this._loadFromServer(pLevel, pCol, pRow);
+
+      // Draw generic fallback while the parent tile loads
       this._drawFallback(level, col, row);
       return;
     }

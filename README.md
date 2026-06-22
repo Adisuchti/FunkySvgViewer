@@ -33,7 +33,7 @@ viewer.mount();
 
 ## Demo
 
-The demo (`index.html`) loads pre-rendered PNG tiles from `rasterizationData/`. The repository does **not** include the SVG map file or pre-rendered tile data — you must generate them first.
+The demo (`index.html`) loads pre-rendered PNG tiles from `rasterizationData/` and includes a **map selector** dropdown that dynamically fetches available manifests via `admin/list-manifests.php`, with a hardcoded fallback. The repository does **not** include the SVG map file or pre-rendered tile data — you must generate them first.
 
 ### 1. Place an SVG file in the project root (e.g. `Altis_Map.svg`)
 
@@ -76,6 +76,7 @@ A tile debug overlay is available at `admin/debug-tiles.html` for visualizing wh
 | C# parallel server-side pre-renderer (SkiaSharp) |
 | Browser-based smart pre-render + upload with delegation (admin panel) |
 | Tile debug overlay with per-level coloring (admin panel) |
+| Dynamic map switching via dropdown (fetches manifests server-side) |
 | Mouse drag to pan |
 | Mouse wheel to zoom (anchored at cursor) |
 | Touch single-finger drag + two-finger pinch zoom |
@@ -302,7 +303,7 @@ When pre-rendering tiles, each tile is compared against the upscaled quadrant of
 
 This means tile `L3-R7-C5` is identical to tile `L2-R3-C2` — the client will display the parent tile instead. Delegation **cascades**: if parent `L2-R3-C2` is also delegated to `L0-R0-C0`, all 16 tiles at level 3 under that parent are automatically delegated to `L0-R0-C0` without any pixel comparison, saving significant compute time.
 
-On the client side, `PreRenderedLoader.isDelegated()` checks the manifest before attempting to fetch a tile. The `Renderer` skips fetch for delegated tiles and uses the fallback mechanism to display the parent tile. This is mathematically correct because a nearest-neighbor upscale preserves all pixel information.
+On the client side, `PreRenderedLoader.isDelegated()` checks the manifest before attempting to fetch a tile. The `Renderer` skips fetch for delegated tiles and instead attempts to blit the delegated parent tile from the in-memory cache immediately — if the parent is cached, it is displayed right away. If the parent is not yet cached, its load is triggered proactively while a generic fallback is drawn. This is mathematically correct because a nearest-neighbor upscale preserves all pixel information.
 
 ---
 
