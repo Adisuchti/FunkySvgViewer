@@ -160,9 +160,14 @@ export class FunkySvgViewer {
     }
 
     // ---- Set up cache (memory or IndexedDB-backed) ----
+    // Ensure the cache can hold at least all tiles at the coarsest level
+    // (worst-case scenario = fit-to-viewport), otherwise tiles get evicted
+    // while still loading and cause flickering with small tile sizes.
+    const tilesAtMinLevel = this._pyramid.colsAt(this._pyramid.minLevel)
+                          * this._pyramid.rowsAt(this._pyramid.minLevel);
     const lruSize = this._options.preRenderAll
       ? Math.max(this._options.cacheSize, this._pyramid.totalTiles())
-      : this._options.cacheSize;
+      : Math.max(this._options.cacheSize, tilesAtMinLevel);
     const lru = new TileCache(lruSize);
 
     if (this._options.cacheBackend === 'indexeddb') {
