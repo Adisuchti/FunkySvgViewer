@@ -73,7 +73,7 @@
 </div>
 
 <script type="module">
-  import { FunkySvgViewer } from './src/index.js';
+  import { FunkySvgViewer } from './src/index.js?v=4';
 
   const mapSelect = document.getElementById('mapSelect');
   let viewer = null;
@@ -127,7 +127,25 @@
     });
 
     viewer.on('load', (d) => console.log('Loaded:', d.width, '×', d.height));
-    viewer.on('ready', () => console.log('Ready —', viewer._pyramid.numLevels, 'levels'));
+    viewer.on('ready', () => {
+      console.log('Ready —', viewer._pyramid.numLevels, 'levels');
+      // Diagnostic: confirm singleColorTiles data is present
+      if (viewer._preRenderedLoader && viewer._preRenderedLoader._manifest) {
+        const sc = viewer._preRenderedLoader._manifest.singleColorTiles;
+        const count = sc ? Object.keys(sc).length : 0;
+        console.log('[Diagnostic] singleColorTiles entries:', count);
+        if (count > 0) {
+          const sample = Object.entries(sc).slice(0, 3);
+          console.log('[Diagnostic] Sample single-color tiles:', sample);
+        } else {
+          console.warn('[Diagnostic] No singleColorTiles in manifest!');
+        }
+        // Log cache-busting token being used
+        if (viewer._preRenderedLoader._cacheToken) {
+          console.log('[Diagnostic] Cache token:', viewer._preRenderedLoader._cacheToken);
+        }
+      }
+    });
     viewer.on('move', updateInfo);
     viewer.on('zoom', updateInfo);
     viewer.on('tileload', () => {

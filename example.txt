@@ -1,0 +1,8 @@
+# C# — PNG
+dotnet run --project cli/PreRender -- Altis_Map_No_Lines1.svg --tileSize 256 --numLevels 4 --lowestRes 4096 --outDir ./rasterizationData
+
+# C# — PNG with palette and 4-bit depth
+dotnet run --project cli/PreRender -- Altis_Map_No_Lines2.svg --format png --palette --bitdepth 2  --tileSize 256 --numLevels 4 --lowestRes 4096 --outDir ./rasterizationData
+
+# C# — WebP output
+dotnet run --project cli/PreRender -- Altis_Map_No_Lines3.svg --format webp --webpQuality 85  --tileSize 256 --numLevels 4 --lowestRes 4096 --outDir ./rasterizationData

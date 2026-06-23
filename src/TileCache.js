@@ -49,6 +49,8 @@ export class TileCache {
   set(level, col, row, canvas) {
     const k = this.key(level, col, row);
     if (this._store.has(k)) {
+      // Update the stored value (in case canvas changed, e.g. from null to a real tile)
+      this._store.set(k, canvas);
       this._touch(k);
     } else {
       // Evict oldest if at capacity

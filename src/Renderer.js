@@ -99,41 +99,23 @@ export class Renderer {
    * Draw a tile (or load from server / rasterize), with fallback.
    */
   _drawOrLoad(level, col, row) {
-    // Check if this tile is known-delegated (server-side optimization)
-    if (this._preRenderedLoader && this._preRenderedLoader.isDelegated(level, col, row)) {
-      const delegation = this._preRenderedLoader.isDelegated(level, col, row);
-      const pLevel = delegation.level;
-      const pCol = delegation.col;
-      const pRow = delegation.row;
-
-      // Check if the explicitly-delegated parent tile is already cached
-      const hasParent = this.cache.has(pLevel, pCol, pRow);
-      if (hasParent === true) {
-        const parentCanvas = this.cache.has(pLevel, pCol, pRow)
-          ? (this.cache.getSync
-              ? this.cache.getSync(pLevel, pCol, pRow)
-              : this.cache.get(pLevel, pCol, pRow))
-          : null;
-        if (parentCanvas && !(parentCanvas instanceof Promise)) {
-          this._blitFallback(parentCanvas, pLevel, pCol, pRow, level, col, row);
-          return;
-        }
-      }
-
-      // Trigger loading of the delegated parent tile so it becomes available
-      this._loadFromServer(pLevel, pCol, pRow);
-
-      // Draw generic fallback while the parent tile loads
-      this._drawFallback(level, col, row);
-      return;
-    }
-
     // Sync cache hit?
     const hasResult = this.cache.has(level, col, row);
     if (hasResult === true) {
       const tileData = this.cache.get(level, col, row);
       if (tileData && !(tileData instanceof Promise)) {
         this._drawTileCanvas(tileData, level, col, row);
+        return;
+      }
+    }
+
+    // ── Single-color tile? Render synchronously from manifest data ──
+    if (this._preRenderedLoader) {
+      const solidColor = this._preRenderedLoader.isSingleColor(level, col, row);
+      if (solidColor) {
+        const tileCanvas = this._createSingleColorCanvas(solidColor);
+        this.cache.set(level, col, row, tileCanvas);
+        this._drawTileCanvas(tileCanvas, level, col, row);
         return;
       }
     }
@@ -147,6 +129,29 @@ export class Renderer {
 
     // Fallback: walk up the pyramid looking for a sync memory hit
     this._drawFallback(level, col, row);
+  }
+
+  /**
+   * Create a solid-color canvas tile from a hex color string "#RRGGBBAA".
+   * Used for file-less single-color tiles detected during pre-rendering.
+   * @param {string} hexColor - e.g. "#1a2b3cff"
+   * @returns {HTMLCanvasElement}
+   */
+  _createSingleColorCanvas(hexColor) {
+    const canvas = document.createElement('canvas');
+    canvas.width = this._tileSize;
+    canvas.height = this._tileSize;
+    const ctx = canvas.getContext('2d');
+
+    const hex = hexColor.replace('#', '');
+    const r = parseInt(hex.substring(0, 2), 16);
+    const g = parseInt(hex.substring(2, 4), 16);
+    const b = parseInt(hex.substring(4, 6), 16);
+    const a = parseInt(hex.substring(6, 8) || 'ff', 16) / 255;
+
+    ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return canvas;
   }
 
   /**
@@ -192,6 +197,7 @@ export class Renderer {
       }
       this.events.emit('tileload', { level, col, row });
     } catch (err) {
+      console.error(`[Renderer] Tile load failed L${level} (${col},${row}):`, err.message || err);
       this.events.emit('tileerror', { level, col, row, error: err });
     } finally {
       this._pending.delete(key);
