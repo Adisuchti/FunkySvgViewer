@@ -13,11 +13,20 @@ export class TileRasterizer {
    * @param {SVGElement} svgElement
    * @param {import('./TilePyramid.js').TilePyramid} pyramid
    * @param {number} tileSize
+   * @param {object} [opts]
+   * @param {number} [opts.scaleX=1] - horizontal scale to map overlay SVG coords to base world coords
+   * @param {number} [opts.scaleY=1] - vertical scale to map overlay SVG coords to base world coords
    */
-  constructor(svgElement, pyramid, tileSize) {
+  constructor(svgElement, pyramid, tileSize, opts = {}) {
     this.svgElement = svgElement;
     this.pyramid = pyramid;
     this.tileSize = tileSize;
+    this.scaleX = opts.scaleX ?? 1;
+    this.scaleY = opts.scaleY ?? 1;
+    /** Intrinsic width of this layer's SVG (before scaling to base) */
+    this.layerWidth = opts.layerWidth ?? pyramid.svgWidth;
+    /** Intrinsic height of this layer's SVG (before scaling to base) */
+    this.layerHeight = opts.layerHeight ?? pyramid.svgHeight;
 
     /** Pre-rendered image of the full SVG at a reference resolution */
     this._svgImage = null;
@@ -75,16 +84,24 @@ export class TileRasterizer {
     const worldX = col * tw;
     const worldY = row * th;
 
+    // Base world dimensions (pyramid is built from the base layer)
     const svgW = this.pyramid.svgWidth;
     const svgH = this.pyramid.svgHeight;
 
-    // Compute the source rectangle in the SVG image (image drawn at svgW×svgH)
-    // The SVG image dimensions: we draw the full image, so its pixel size
-    // equals svgW×svgH (the intrinsic size derived from viewBox or width/height).
-    const imgW = this._svgImage.naturalWidth || svgW;
-    const imgH = this._svgImage.naturalHeight || svgH;
+    // Overlay SVG image dimensions: use naturalWidth/Height from the loaded
+    // image, falling back to this layer's intrinsic width/height.
+    // For the base layer, layerWidth == svgW and layerHeight == svgH.
+    // For overlay layers with different dimensions, naturalWidth will be the
+    // overlay's own pixel size (e.g. 500×500 for a grid overlay on a 1000×800
+    // base). The mapping (worldX / svgW) * overlayImgWidth naturally handles
+    // non-uniform scaling — stretching the overlay to fill the base.
+    const imgW = this._svgImage.naturalWidth || this.layerWidth;
+    const imgH = this._svgImage.naturalHeight || this.layerHeight;
 
-    // Map world coords → image pixel coords
+    // Map base-world coords → overlay SVG image pixel coords
+    // Formula: fraction of base world * overlay image pixel size
+    //   worldX/svgW = 0..1 fraction across base → times overlay pixels
+    // This automatically scales non-uniformly in X and Y.
     const sx = (worldX / svgW) * imgW;
     const sy = (worldY / svgH) * imgH;
     const sw = (tw / svgW) * imgW;

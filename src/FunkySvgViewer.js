@@ -1,5 +1,6 @@
 import { EventBus } from './EventBus.js';
 import { SvgLoader } from './SvgLoader.js';
+import { LayerManager } from './LayerManager.js';
 import { Viewport } from './Viewport.js';
 import { InteractionLayer } from './InteractionLayer.js';
 import { Renderer } from './Renderer.js';
@@ -24,6 +25,8 @@ const DEFAULT_OPTIONS = {
   minLevel: 0,
   preRenderAll: false,
   cacheBackend: 'memory',  // 'memory' | 'indexeddb'
+  // layers: [{ svg, label, visible }]   — new multi-layer API
+  // svg: '...'                          — backward-compat single-layer API
   // numLevels, lowestRes, highestRes: undefined = auto-compute
   // preRendered: undefined
 };
@@ -32,7 +35,8 @@ export class FunkySvgViewer {
   /**
    * @param {string|HTMLElement} container
    * @param {object} options
-   * @param {string|SVGElement} options.svg
+   * @param {string|SVGElement} [options.svg]                         — single-layer (backward compat)
+   * @param {Array<{svg: string|SVGElement, label?: string, visible?: boolean}>} [options.layers] — multi-layer
    * @param {boolean} [options.sanitize=true]
    * @param {number} [options.minZoom=0.01]
    * @param {number} [options.maxZoom=100]
@@ -59,13 +63,44 @@ export class FunkySvgViewer {
 
     this._options = { ...DEFAULT_OPTIONS, ...options };
 
-    if (!this._options.svg) throw new Error('FunkySvgViewer: "svg" option is required');
+    // ── Determine layer source ──
+    const hasLayers = this._options.layers && Array.isArray(this._options.layers) && this._options.layers.length > 0;
+    const hasSvg = !!this._options.svg;
+    const hasPreRenderedLayers = this._options.preRenderedLayers && Array.isArray(this._options.preRenderedLayers) && this._options.preRenderedLayers.length > 0;
 
-    if (this._options.preRendered) {
+    if (hasLayers) {
+      this._isMultiLayer = true;
+    } else if (hasSvg) {
+      // Wrap single SVG as a layers array for uniform handling (only if not preRenderedLayers mode)
+      if (!hasPreRenderedLayers) {
+        this._options.layers = [{ svg: this._options.svg }];
+      }
+      this._isMultiLayer = false;
+    } else if (hasPreRenderedLayers) {
+      // preRenderedLayers mode doesn't need svg/layers
+      this._isMultiLayer = false;
+    } else {
+      throw new Error('FunkySvgViewer: either "svg", "layers", or "preRenderedLayers" option is required');
+    }
+
+    // ── Determine rendering mode ──
+    if (this._options.preRenderedLayers && Array.isArray(this._options.preRenderedLayers) && this._options.preRenderedLayers.length > 0) {
+      // ── Multi-layer pre-rendered mode ──
+      this._preRenderedConfigs = this._options.preRenderedLayers.map(cfg =>
+        typeof cfg === 'string' ? { manifestUrl: cfg } : { ...cfg }
+      );
+      this._preRenderedConfig = null;
+      this._isMultiPreRendered = true;
+    } else if (this._options.preRendered) {
+      // ── Single pre-rendered mode (backward compat) ──
       const pr = this._options.preRendered;
       this._preRenderedConfig = typeof pr === 'string' ? { manifestUrl: pr } : { ...pr };
+      this._preRenderedConfigs = null;
+      this._isMultiPreRendered = false;
     } else {
       this._preRenderedConfig = null;
+      this._preRenderedConfigs = null;
+      this._isMultiPreRendered = false;
     }
 
     this.events = new EventBus();
@@ -80,9 +115,17 @@ export class FunkySvgViewer {
     this._interaction = null;
     this._renderer = null;
     this._pyramid = null;
-    this._cache = null;
+    /** @type {LayerManager|null} */
+    this._layerManager = null;
+    /** @type {Array<TileCache|PersistentTileCache>} per-layer caches */
+    this._layerCaches = [];
     this._idbStore = null;
+    /** @type {PreRenderedLoader|null} single pre-rendered (backward compat) */
     this._preRenderedLoader = null;
+    /** @type {Array<PreRenderedLoader>|null} multi-pre-rendered loaders */
+    this._preRenderedLoaders = null;
+    /** @type {Array<{label:string, visible:boolean, width:number, height:number, scaleX:number, scaleY:number}>} layer metadata for pre-rendered overlays */
+    this._prLayerMeta = [];
     this._rafId = null;
     this._mounted = false;
   }
@@ -90,15 +133,56 @@ export class FunkySvgViewer {
   async mount() {
     if (this._mounted) return;
 
-    let width, height, svgElement, svgIdentifier;
+    let width, height, svgIdentifier;
 
-    if (this._preRenderedConfig) {
+    if (this._isMultiPreRendered && this._preRenderedConfigs) {
+      // ── Multi-layer pre-rendered mode ──
+      this.events.emit('loadstart');
+      const configs = this._preRenderedConfigs;
+
+      // Load all manifests in parallel
+      const loaders = configs.map(cfg => new PreRenderedLoader(cfg));
+      const manifests = await Promise.all(loaders.map(l => l.loadManifest()));
+
+      // Layer 0 (base) defines the coordinate system
+      const baseManifest = manifests[0];
+      width = baseManifest.svgWidth;
+      height = baseManifest.svgHeight;
+      svgIdentifier = baseManifest.svgName + '+overlays';
+
+      this._options.tileSize   = baseManifest.tileSize   ?? this._options.tileSize;
+      this._options.minLevel   = baseManifest.minLevel   ?? 0;
+      this._options.maxLevel   = baseManifest.maxLevel;
+      this._options.numLevels  = baseManifest.numLevels;
+
+      this._preRenderedLoaders = loaders;
+
+      // Build layer metadata for toggles & scaling
+      this._prLayerMeta = manifests.map((m, i) => ({
+        label: m.svgName || `Layer ${i}`,
+        visible: true,
+        width: m.svgWidth,
+        height: m.svgHeight,
+        levels: (m.maxLevel ?? 0) - (m.minLevel ?? 0) + 1,
+        tileCount: m.actualTileCount ?? m.totalTiles ?? 0,
+      }));
+
+      // Compute scale for overlay layers (non-uniform stretch to base)
+      for (let i = 1; i < this._prLayerMeta.length; i++) {
+        const l = this._prLayerMeta[i];
+        l.scaleX = width / l.width;
+        l.scaleY = height / l.height;
+      }
+      this._prLayerMeta[0].scaleX = 1;
+      this._prLayerMeta[0].scaleY = 1;
+
+      this.events.emit('load', { width, height });
+    } else if (this._preRenderedConfig) {
       this._preRenderedLoader = new PreRenderedLoader(this._preRenderedConfig);
       this.events.emit('loadstart');
       const manifest = await this._preRenderedLoader.loadManifest();
       width = manifest.svgWidth;
       height = manifest.svgHeight;
-      svgElement = null;
       svgIdentifier = manifest.svgName;
 
       // Override pyramid options from the manifest so the client-side
@@ -109,16 +193,17 @@ export class FunkySvgViewer {
       this._options.numLevels  = manifest.numLevels;
       this.events.emit('load', { width, height });
     } else {
-      const loader = new SvgLoader(this._options.svg, this._options.sanitize);
+      // ── Load all layers via LayerManager ──
+      this._layerManager = new LayerManager(this._options.layers, this._options.sanitize);
       this.events.emit('loadstart');
-      const result = await loader.load();
-      svgElement = result.svgElement;
-      width = result.width;
-      height = result.height;
-      // Derive SVG identifier from file name (e.g., "Altis_Map" from "Altis_Map.svg")
-      const svgSrc = this._options.svg;
-      svgIdentifier = typeof svgSrc === 'string'
-        ? svgSrc.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '')
+      await this._layerManager.load();
+      width = this._layerManager.baseWidth;
+      height = this._layerManager.baseHeight;
+
+      // Derive SVG identifier from first layer's file name
+      const firstSvg = this._options.layers[0].svg;
+      svgIdentifier = typeof firstSvg === 'string'
+        ? firstSvg.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '')
         : 'inline-svg';
       this.events.emit('load', { width, height });
     }
@@ -135,7 +220,7 @@ export class FunkySvgViewer {
     });
     this._viewport.fitToViewport(this._canvas.clientWidth, this._canvas.clientHeight);
 
-    if (this._preRenderedLoader && this._options.maxLevel !== undefined) {
+    if ((this._preRenderedLoader || this._preRenderedLoaders) && this._options.maxLevel !== undefined) {
       // Build pyramid from manifest values (exact match with pre-rendered tiles)
       this._pyramid = new TilePyramid({
         svgWidth: width,
@@ -159,32 +244,65 @@ export class FunkySvgViewer {
       });
     }
 
-    // ---- Set up cache (memory or IndexedDB-backed) ----
-    // Ensure the cache can hold at least all tiles at the coarsest level
-    // (worst-case scenario = fit-to-viewport), otherwise tiles get evicted
-    // while still loading and cause flickering with small tile sizes.
-    const tilesAtMinLevel = this._pyramid.colsAt(this._pyramid.minLevel)
-                          * this._pyramid.rowsAt(this._pyramid.minLevel);
-    const lruSize = this._options.preRenderAll
-      ? Math.max(this._options.cacheSize, this._pyramid.totalTiles())
-      : Math.max(this._options.cacheSize, tilesAtMinLevel);
-    const lru = new TileCache(lruSize);
-
-    if (this._options.cacheBackend === 'indexeddb') {
-      this._idbStore = new IndexedDBTileStore(svgIdentifier);
-      this._cache = new PersistentTileCache(lru, this._idbStore);
+    // ── Set up per-layer caches ──
+    if (this._isMultiPreRendered && this._preRenderedLoaders) {
+      // Multi-pre-rendered: per-layer caches
+      await this._setupPreRenderedLayerCaches(svgIdentifier);
+    } else if (!this._preRenderedLoader) {
+      // Client-side multi-layer rasterization path
+      await this._setupMultiLayerCaches(width, height, svgIdentifier);
     } else {
-      this._cache = lru;
+      // Pre-rendered single-layer path (unchanged)
+      const tilesAtMinLevel = this._pyramid.colsAt(this._pyramid.minLevel)
+                            * this._pyramid.rowsAt(this._pyramid.minLevel);
+      const lruSize = this._options.preRenderAll
+        ? Math.max(this._options.cacheSize, this._pyramid.totalTiles())
+        : Math.max(this._options.cacheSize, tilesAtMinLevel);
+      const lru = new TileCache(lruSize);
+
+      if (this._options.cacheBackend === 'indexeddb') {
+        this._idbStore = new IndexedDBTileStore(svgIdentifier);
+        this._cache = new PersistentTileCache(lru, this._idbStore);
+      } else {
+        this._cache = lru;
+      }
+      this._layerCaches = [this._cache];
     }
 
-    this._renderer = new Renderer(this._canvas, svgElement, this._viewport, {
-      pyramid: this._pyramid,
-      cache: this._cache,
-      events: this.events,
-    });
+    // ── Create Renderer ──
+    if (this._isMultiPreRendered && this._preRenderedLoaders) {
+      this._renderer = new Renderer(this._canvas, null, this._viewport, {
+        pyramid: this._pyramid,
+        caches: this._layerCaches,
+        preRenderedLoaders: this._preRenderedLoaders,
+        prLayerMeta: this._prLayerMeta,
+        events: this.events,
+      });
+    } else if (this._preRenderedLoader) {
+      this._renderer = new Renderer(this._canvas, null, this._viewport, {
+        pyramid: this._pyramid,
+        cache: this._cache,
+        caches: this._layerCaches,
+        events: this.events,
+      });
+    } else {
+      this._renderer = new Renderer(this._canvas, null, this._viewport, {
+        pyramid: this._pyramid,
+        caches: this._layerCaches,
+        layerManager: this._layerManager,
+        events: this.events,
+      });
+    }
     this._renderer._bgColor = this._options.background;
 
-    if (this._preRenderedLoader) {
+    if (this._isMultiPreRendered && this._preRenderedLoaders) {
+      await this._renderer.prepare({
+        preRenderAll: false,
+        preRenderedLoaders: this._preRenderedLoaders,
+        prLayerMeta: this._prLayerMeta,
+        onProgress: this._options.onPreloadProgress,
+      });
+    } else if (this._preRenderedLoader) {
       await this._renderer.prepare({
         preRenderAll: false,
         preRenderedLoader: this._preRenderedLoader,
@@ -194,6 +312,7 @@ export class FunkySvgViewer {
       await this._renderer.prepare({
         preRenderAll: this._options.preRenderAll,
         onProgress: this._options.onPreloadProgress,
+        layerManager: this._layerManager,
       });
     }
 
@@ -209,6 +328,63 @@ export class FunkySvgViewer {
 
     this.events.emit('ready');
   }
+
+  /**
+   * Create per-layer caches with namespace isolation for multi-pre-rendered layers.
+   */
+  async _setupPreRenderedLayerCaches(svgIdentifier) {
+    const numLayers = this._preRenderedLoaders.length;
+    const tilesAtMinLevel = this._pyramid.colsAt(this._pyramid.minLevel)
+                          * this._pyramid.rowsAt(this._pyramid.minLevel);
+    const lruSize = Math.max(this._options.cacheSize, tilesAtMinLevel);
+
+    for (let i = 0; i < numLayers; i++) {
+      const namespace = `PRL${i}`;
+      const lru = new TileCache(lruSize, namespace);
+
+      if (this._options.cacheBackend === 'indexeddb') {
+        const storeName = `${svgIdentifier}_prlayer${i}`;
+        const idbStore = new IndexedDBTileStore(storeName);
+        const persistent = new PersistentTileCache(lru, idbStore);
+        this._layerCaches.push(persistent);
+      } else {
+        this._layerCaches.push(lru);
+      }
+    }
+
+    this._cache = this._layerCaches[0];
+  }
+
+  /**
+   * Create per-layer caches with namespace isolation (client-side rasterization).
+   */
+  async _setupMultiLayerCaches(width, height, svgIdentifier) {
+    const numLayers = this._layerManager.layerCount;
+    const tilesAtMinLevel = this._pyramid.colsAt(this._pyramid.minLevel)
+                          * this._pyramid.rowsAt(this._pyramid.minLevel);
+    const lruSize = this._options.preRenderAll
+      ? Math.max(this._options.cacheSize, this._pyramid.totalTiles())
+      : Math.max(this._options.cacheSize, tilesAtMinLevel);
+
+    for (let i = 0; i < numLayers; i++) {
+      const namespace = `L${i}`;
+      const lru = new TileCache(lruSize, namespace);
+
+      if (this._options.cacheBackend === 'indexeddb') {
+        const storeName = `${svgIdentifier}_layer${i}`;
+        const idbStore = new IndexedDBTileStore(storeName);
+        const persistent = new PersistentTileCache(lru, idbStore);
+        this._layerCaches.push(persistent);
+      } else {
+        this._layerCaches.push(lru);
+      }
+    }
+
+    // Keep backward-compat _cache reference pointing to layer 0
+    this._cache = this._layerCaches[0];
+  }
+
+  // ── Public API ──────────────────────────────────────────────────
 
   on(event, fn) { this.events.on(event, fn); }
   off(event, fn) { this.events.off(event, fn); }
@@ -235,6 +411,74 @@ export class FunkySvgViewer {
     return this._viewport ? this._viewport.getState() : null;
   }
 
+  // ── Layer visibility API ──
+
+  /**
+   * Set a layer's visibility.
+   * @param {number} index - layer index (0 = base)
+   * @param {boolean} visible
+   */
+  setLayerVisible(index, visible) {
+    // Client-side multi-layer path
+    if (this._layerManager) {
+      this._layerManager.setVisible(index, visible);
+      this.events.emit('layerschange', this._layerManager.getLayerInfo());
+      return;
+    }
+    // Multi-pre-rendered path
+    if (this._prLayerMeta && index < this._prLayerMeta.length) {
+      this._prLayerMeta[index].visible = !!visible;
+      if (this._renderer) {
+        this._renderer.setLayerVisible(index, visible);
+      }
+      this.events.emit('layerschange', this.getLayers());
+    }
+  }
+
+  /**
+   * Toggle a layer's visibility.
+   * @param {number} index
+   * @returns {boolean} new visibility state
+   */
+  toggleLayer(index) {
+    // Client-side multi-layer path
+    if (this._layerManager) {
+      const newState = this._layerManager.toggle(index);
+      this.events.emit('layerschange', this._layerManager.getLayerInfo());
+      return newState;
+    }
+    // Multi-pre-rendered path
+    if (this._prLayerMeta && index < this._prLayerMeta.length) {
+      const current = this._prLayerMeta[index].visible;
+      this.setLayerVisible(index, !current);
+      return !current;
+    }
+    return false;
+  }
+
+  /**
+   * Get info about all layers (label, visible, dimensions, scale).
+   * Supports both client-side and pre-rendered multi-layer modes.
+   * @returns {Array<object>}
+   */
+  getLayers() {
+    if (this._layerManager) {
+      return this._layerManager.getLayerInfo();
+    }
+    if (this._prLayerMeta) {
+      return this._prLayerMeta.map((l, i) => ({
+        index: i,
+        label: l.label,
+        visible: l.visible,
+        width: l.width,
+        height: l.height,
+        scaleX: l.scaleX ?? 1,
+        scaleY: l.scaleY ?? 1,
+      }));
+    }
+    return [];
+  }
+
   destroy() {
     this._stopLoop();
 
@@ -244,10 +488,15 @@ export class FunkySvgViewer {
     }
     if (this._interaction) { this._interaction.destroy(); this._interaction = null; }
     if (this._renderer) { this._renderer.destroy(); this._renderer = null; }
-    if (this._cache) { this._cache.clear(); this._cache = null; }
+    for (const cache of this._layerCaches) {
+      cache.clear();
+    }
+    this._layerCaches = [];
+    this._cache = null;
     if (this._idbStore) { this._idbStore.clear().catch(() => {}); this._idbStore = null; }
 
     this._pyramid = null;
+    this._layerManager = null;
     this._preRenderedLoader = null;
 
     if (this._canvas && this._canvas.parentElement) {

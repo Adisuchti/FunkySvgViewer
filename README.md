@@ -65,10 +65,13 @@ A tile debug overlay is available at `admin/debug-tiles.html` for visualizing wh
 | Feature |
 | ------- |
 | Load SVG from URL, inline string, or `<svg>` element |
+| **Multi-layer overlay** — combine multiple SVGs or pre-rendered tile sets with per-layer visibility toggles |
+| **Auto-scaling overlays** — overlay SVGs of any dimension are non-uniformly scaled to match the base layer |
+| **Dynamic layer selection** — pick any combination of pre-rendered renders from `rasterizationData/` at runtime |
 | Tile pyramid — multi-resolution rendering at discrete zoom levels |
 | Lazy tile rasterization — tiles generated on demand, on first visibility |
 | Fallback tiles — coarser-level tiles shown while finer ones load |
-| In-memory tile cache with LRU eviction |
+| Per-layer in-memory tile cache with LRU eviction and namespace isolation |
 | Server-side pre-rendered PNG tiles via manifest |
 | IndexedDB persistent tile cache |
 | Pre-render all tiles upfront (`preRenderAll`) |
@@ -78,17 +81,16 @@ A tile debug overlay is available at `admin/debug-tiles.html` for visualizing wh
 | C# parallel server-side pre-renderer (SkiaSharp) |
 | Browser-based smart pre-render + upload with single-color detection (admin panel) |
 | Tile debug overlay with per-level coloring (admin panel) |
-| Dynamic map switching via dropdown (fetches manifests server-side) |
 | Mouse drag to pan |
 | Mouse wheel to zoom (anchored at cursor) |
 | Touch single-finger drag + two-finger pinch zoom |
 | Button controls (zoom in/out, fit) |
-| Event system (`loadstart`, `load`, `ready`, `move`, `zoom`, `click`, `dblclick`, `tileload`, `tileerror`, `preloadprogress`) |
+| Event system (`loadstart`, `load`, `ready`, `move`, `zoom`, `click`, `dblclick`, `tileload`, `tileerror`, `layerschange`, `preloadprogress`) |
 | SVG-world coordinates in click events |
 | Responsive resize (ResizeObserver) |
 | XSS sanitization (strips `<script>`, `on*` attributes) |
 | Configurable zoom bounds, tile size, pyramid levels, and background color |
-| `fitToViewport()`, `panTo()`, `zoomTo()` programmatic API |
+| `fitToViewport()`, `panTo()`, `zoomTo()`, `setLayerVisible()`, `toggleLayer()`, `getLayers()` programmatic API |
 | Zero runtime dependencies |
 
 ### Known Limitations
@@ -96,7 +98,6 @@ A tile debug overlay is available at `admin/debug-tiles.html` for visualizing wh
 - **No Worker rasterization** — heavy SVGs rasterize on the main thread via `requestAnimationFrame` batching. Large pyramids may cause jank during initial pre-rendering.
 - **No animated SVGs** — SMIL / CSS animations are not rendered (static raster only).
 - **Single-color tile detection** — tiles that are entirely one solid color are stored file-less as hex colors in the manifest, rendered synchronously on the client with no network request.
-- **No overlay API** — markers and custom elements on top of the SVG are planned.
 - **No TypeScript declarations** — plain JavaScript with JSDoc annotations.
 - **No inertia panning** — pan stops immediately on mouse/touch release.
 
@@ -127,20 +128,27 @@ new FunkySvgViewer(container: string | HTMLElement, options: Options)
 | `highestRes` | `number` | — | Full-SVG pixel width at the finest level (derives `numLevels`) |
 | `preRenderAll` | `boolean` | `false` | Rasterize every tile at startup instead of lazily |
 | `cacheBackend` | `'memory' \| 'indexeddb'` | `'memory'` | Tile cache storage backend |
-| `preRendered` | `string \| { manifestUrl: string, baseUrl?: string }` | — | Load pre-rendered PNG tiles from a server manifest |
+| `preRendered` | `string \| { manifestUrl: string, baseUrl?: string }` | — | Load pre-rendered PNG tiles from a server manifest (single-layer) |
+| `preRenderedLayers` | `Array<string \| { manifestUrl: string, baseUrl?: string }>` | — | Multiple pre-rendered layers to overlay. First = base, rest = overlays. |
+| `layers` | `Array<{ svg: string\|SVGElement, label?: string, visible?: boolean }>` | — | Multiple client-side rasterized SVG layers to overlay. First = base. |
 | `onPreloadProgress` | `(pct: number) => void` | — | Progress callback during `preRenderAll` |
+
+> **Note:** When using `preRenderedLayers`, you do **not** need to provide `svg` or `preRendered`. The base layer defines the coordinate system and tile pyramid.
 
 ### Methods
 
 | Method | Description |
 | ------ | ----------- |
-| `mount()` | Load SVG, start rendering. Returns `Promise<void>`. |
+| `mount()` | Loads all layers, builds pyramid, starts rendering. Returns `Promise<void>`. |
 | `on(event, fn)` | Subscribe to an event. |
 | `off(event, fn)` | Unsubscribe from an event. |
 | `panTo(x, y)` | Pan to world coordinates. |
 | `zoomTo(zoom)` | Set absolute zoom level. |
 | `fitToViewport()` | Fit the entire SVG within the container. |
 | `getState()` | Returns `{ centerX, centerY, zoom }`. |
+| `setLayerVisible(index, visible)` | Show or hide a specific overlay layer. |
+| `toggleLayer(index)` | Toggle a layer's visibility. Returns new state. |
+| `getLayers()` | Returns array of `{ index, label, visible, width, height, scaleX, scaleY }`. |
 | `destroy()` | Remove all listeners, DOM elements, and stop rendering. |
 
 ### Events
@@ -156,6 +164,7 @@ new FunkySvgViewer(container: string | HTMLElement, options: Options)
 | `dblclick` | `{ screenX, screenY, worldX, worldY, originalEvent }` |
 | `tileload` | `{ level, col, row }` — tile successfully loaded/cached |
 | `tileerror` | `{ level, col, row, error }` — tile loading failed |
+| `layerschange` | `[{ index, label, visible, width, height, scaleX, scaleY }]` — layer visibility changed |
 | `preloadprogress` | `{ done, total }` — progress during `preRenderAll` |
 
 ---

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SVG Pan & Zoom — Demo</title>
+  <title>SVG Pan & Zoom — Multi-Layer Overlay</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -16,52 +16,122 @@
       overflow: hidden;
     }
     header {
-      padding: 8px 12px;
+      padding: 6px 12px;
       background: #000;
       color: #fff;
       display: flex;
       align-items: center;
       gap: 8px;
       flex-shrink: 0;
+      flex-wrap: wrap;
     }
-    header h1 { font-size: 1rem; font-weight: bold; margin-right: auto; }
+    header h1 { font-size: 0.95rem; font-weight: bold; margin-right: auto; }
     button {
       padding: 4px 10px;
       border: 2px solid #fff;
       background: #000;
       color: #fff;
       cursor: pointer;
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       font-family: monospace;
     }
     button:hover { background: #fff; color: #000; }
+    button.primary { border-color: #0f0; color: #0f0; }
+    button.primary:hover { background: #0f0; color: #000; }
+
+    .panel {
+      padding: 6px 10px;
+      background: #222;
+      color: #fff;
+      font-size: 0.7rem;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      border-bottom: 1px solid #444;
+    }
+    .panel label {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      cursor: pointer;
+      user-select: none;
+      padding: 2px 5px;
+      border: 1px solid #444;
+      border-radius: 3px;
+      white-space: nowrap;
+    }
+    .panel label:hover { border-color: #888; }
+    .panel label.base-layer { border-color: #0f0; border-width: 1px; }
+    .panel label.active { border-color: #0a0; background: #1a3a1a; }
+    .panel input[type="checkbox"], .panel input[type="radio"] {
+      cursor: pointer;
+      margin: 0;
+    }
+    .panel .selected-count { opacity: 0.6; font-size: 0.65rem; }
+
+    .layer-panel {
+      padding: 5px 10px;
+      background: #1a1a1a;
+      color: #ccc;
+      font-size: 0.7rem;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .layer-panel label { border-color: #555; }
+    .layer-panel label:hover { border-color: #fff; }
+
     #container {
       flex: 1;
       min-height: 0;
-      background: #ccc;
+      background: #333;
     }
     .info-bar {
-      padding: 4px 12px;
+      padding: 3px 10px;
       background: #000;
       color: #fff;
-      font-size: 0.75rem;
+      font-size: 0.7rem;
       display: flex;
-      gap: 16px;
+      gap: 14px;
       flex-shrink: 0;
+    }
+
+    .manifest-list {
+      max-height: 160px;
+      overflow-y: auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+      align-items: flex-start;
     }
   </style>
 </head>
 <body>
 
 <header>
-  <h1>SVG Pan & Zoom — Pre-Rendered Tiles</h1>
-  <select id="mapSelect" style="padding:4px 8px;border:2px solid #fff;background:#000;color:#fff;font-family:monospace;font-size:0.8rem;cursor:pointer;">
-    <option value="">Loading…</option>
-  </select>
+  <h1>FunkySvgViewer — Overlay Layers</h1>
   <button id="btn-fit">Fit</button>
   <button id="btn-zoomin">Zoom In</button>
   <button id="btn-zoomout">Zoom Out</button>
 </header>
+
+<!-- Manifest selector panel -->
+<div class="panel" id="selectPanel">
+  <span style="opacity:0.7;">Select layers:</span>
+  <span id="manifestChecks" class="manifest-list">Loading…</span>
+  <span class="selected-count" id="selectedCount"></span>
+  <button id="btn-apply" class="primary" disabled>Apply</button>
+</div>
+
+<!-- Live layer visibility toggles (shown after Apply) -->
+<div class="layer-panel" id="layerPanel" style="display:none;">
+  <span style="opacity:0.6;">Toggle:</span>
+  <span id="layerChecks"></span>
+</div>
 
 <div id="container"></div>
 
@@ -73,108 +143,191 @@
 </div>
 
 <script type="module">
-  import { FunkySvgViewer } from './src/index.js?v=4';
+  import { FunkySvgViewer } from './src/index.js?v=5';
 
-  const mapSelect = document.getElementById('mapSelect');
   let viewer = null;
+  let allManifests = [];
+  let selectedManifests = new Set();
 
-  // ── Load available manifests via the server-side script ─────────
+  // ── Load all available manifests ────────────────────────────────
   async function loadManifestList() {
     try {
       const resp = await fetch('admin/list-manifests.php');
       if (resp.ok) {
         const list = await resp.json();
-        mapSelect.innerHTML = list.map(m => {
-          // PHP returns paths relative to admin/ (e.g. ../rasterizationData/...)
-          // Strip the leading ../ so they resolve correctly from root
-          const path = m.path.startsWith('../') ? m.path.slice(3) : m.path;
-          return `<option value="${path}" data-svg="${m.name}">${m.name} (${m.levels} levels)</option>`;
-        }).join('');
-        if (list.length > 0) {
-          const first = list[0].path.startsWith('../') ? list[0].path.slice(3) : list[0].path;
-          mapSelect.value = first;
-        }
+        // Normalize paths: strip leading ../ from PHP output
+        allManifests = list.map(m => ({
+          name: m.name,
+          path: m.path.startsWith('../') ? m.path.slice(3) : m.path,
+          levels: m.levels,
+          totalTiles: m.totalTiles,
+        }));
+        return allManifests;
       }
-    } catch {
-      // Fallback to hardcoded entries
-      mapSelect.innerHTML = `
-        <option value="rasterizationData/Altis_Map/manifest.json" data-svg="Altis_Map">Altis_Map</option>
-        <option value="rasterizationData/Altis_Map_No_Lines/manifest.json" data-svg="Altis_Map_No_Lines">Altis_Map_No_Lines</option>
-      `;
-      mapSelect.value = "rasterizationData/Altis_Map/manifest.json";
+    } catch (e) {
+      console.warn('Could not load manifests:', e);
+    }
+    return [];
+  }
+
+  // ── Render the manifest checklist ───────────────────────────────
+  function renderManifestChecks() {
+    const container = document.getElementById('manifestChecks');
+    if (allManifests.length === 0) {
+      container.textContent = 'No renders found in rasterizationData/';
+      return;
+    }
+
+    container.innerHTML = allManifests.map((m, i) => {
+      const isBase = selectedManifests.size > 0 && selectedManifests.values().next().value === i;
+      return `<label class="${isBase ? 'base-layer' : ''} ${selectedManifests.has(i) ? 'active' : ''}"
+                   title="${m.name} — ${m.levels} levels, ${m.totalTiles} tiles">
+        <input type="checkbox" data-idx="${i}" ${selectedManifests.has(i) ? 'checked' : ''} />
+        ${m.name}
+      </label>`;
+    }).join('');
+
+    updateSelectedCount();
+
+    // Wire checkbox events
+    container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const idx = parseInt(cb.dataset.idx);
+        if (cb.checked) {
+          selectedManifests.add(idx);
+        } else {
+          selectedManifests.delete(idx);
+        }
+        renderManifestChecks();
+      });
+    });
+  }
+
+  function updateSelectedCount() {
+    const el = document.getElementById('selectedCount');
+    const btn = document.getElementById('btn-apply');
+    if (selectedManifests.size === 0) {
+      el.textContent = '';
+      btn.disabled = true;
+    } else {
+      const names = [...selectedManifests].slice(0, 3).map(i => allManifests[i].name).join(', ');
+      const more = selectedManifests.size > 3 ? ` +${selectedManifests.size - 3} more` : '';
+      el.textContent = `${selectedManifests.size} selected: ${names}${more}`;
+      btn.disabled = false;
     }
   }
 
-  // ── Initialize viewer with the selected manifest ────────────────
-  async function initViewer() {
-    const selectedOption = mapSelect.selectedOptions[0];
-    const manifestUrl = mapSelect.value;
-    const svgName = selectedOption ? selectedOption.dataset.svg : 'Altis_Map';
-    const baseUrl = manifestUrl.replace(/manifest\.json$/, '');
+  // ── Initialize viewer with selected pre-rendered layers ─────────
+  async function applySelection() {
+    if (selectedManifests.size === 0) return;
 
     if (viewer) {
       viewer.destroy();
       viewer = null;
     }
 
-    viewer = new FunkySvgViewer('#container', {
-      svg: svgName + '.svg',
-      preRendered: {
-        manifestUrl: manifestUrl,
+    // Build preRenderedLayers array. First selected = base.
+    const indices = [...selectedManifests];
+    const layerConfigs = indices.map(i => {
+      const m = allManifests[i];
+      const baseUrl = m.path.replace(/manifest\.json$/, '');
+      return {
+        manifestUrl: m.path,
         baseUrl: baseUrl,
-      },
-      background: '#ccc',
+      };
     });
 
-    viewer.on('load', (d) => console.log('Loaded:', d.width, '×', d.height));
+    viewer = new FunkySvgViewer('#container', {
+      svg: '_placeholder',  // required for validation but unused in preRenderedLayers mode
+      preRenderedLayers: layerConfigs,
+      background: '#333',
+    });
+
+    viewer.on('load', (d) => {
+      console.log('Loaded:', d.width, '×', d.height);
+    });
     viewer.on('ready', () => {
       console.log('Ready —', viewer._pyramid.numLevels, 'levels');
-      // Diagnostic: confirm singleColorTiles data is present
-      if (viewer._preRenderedLoader && viewer._preRenderedLoader._manifest) {
-        const sc = viewer._preRenderedLoader._manifest.singleColorTiles;
-        const count = sc ? Object.keys(sc).length : 0;
-        console.log('[Diagnostic] singleColorTiles entries:', count);
-        if (count > 0) {
-          const sample = Object.entries(sc).slice(0, 3);
-          console.log('[Diagnostic] Sample single-color tiles:', sample);
-        } else {
-          console.warn('[Diagnostic] No singleColorTiles in manifest!');
-        }
-        // Log cache-busting token being used
-        if (viewer._preRenderedLoader._cacheToken) {
-          console.log('[Diagnostic] Cache token:', viewer._preRenderedLoader._cacheToken);
-        }
-      }
+      const layers = viewer.getLayers();
+      layers.forEach(l => {
+        console.log(`  Layer ${l.index}: "${l.label}" ${l.width}×${l.height} visible=${l.visible}`);
+      });
+      updateLayerPanel();
     });
     viewer.on('move', updateInfo);
     viewer.on('zoom', updateInfo);
-    viewer.on('tileload', () => {
-      document.getElementById('info-tiles').textContent = viewer._cache.size;
-    });
+    viewer.on('tileload', updateTileCount);
+    viewer.on('layerschange', updateLayerPanel);
     viewer.on('click', (ev) => {
       console.log('Click world:', ev.worldX.toFixed(0), ev.worldY.toFixed(0));
     });
 
     await viewer.mount();
     updateInfo(viewer.getState());
+    updateLayerPanel();
   }
 
-  // ── Info bar updates ───────────────────────────────────────────
+  // ── Info bar ────────────────────────────────────────────────────
   function updateInfo(state) {
     if (!state) return;
     document.getElementById('info-center').textContent =
       `(${state.centerX.toFixed(0)}, ${state.centerY.toFixed(0)})`;
     document.getElementById('info-zoom').textContent = state.zoom.toFixed(4);
-    if (viewer._pyramid) {
+    if (viewer && viewer._pyramid) {
       const lvl = viewer._pyramid.levelForZoom(state.zoom);
       document.getElementById('info-level').textContent =
         lvl + ' (' + viewer._pyramid.minLevel + '-' + viewer._pyramid.maxLevel + ')';
     }
-    document.getElementById('info-tiles').textContent =
-      viewer._cache ? viewer._cache.size : 0;
+    updateTileCount();
   }
 
-  // ── Event handlers ─────────────────────────────────────────────
+  function updateTileCount() {
+    if (!viewer) return;
+    let total = 0;
+    if (viewer._layerCaches) {
+      for (const c of viewer._layerCaches) {
+        total += c ? c.size : 0;
+      }
+    } else if (viewer._cache) {
+      total = viewer._cache.size;
+    }
+    document.getElementById('info-tiles').textContent = total;
+  }
+
+  // ── Layer toggle panel ──────────────────────────────────────────
+  function updateLayerPanel() {
+    const panel = document.getElementById('layerPanel');
+    const checks = document.getElementById('layerChecks');
+
+    if (!viewer) {
+      panel.style.display = 'none';
+      return;
+    }
+
+    const layers = viewer.getLayers();
+    if (layers.length <= 1) {
+      panel.style.display = 'none';
+      return;
+    }
+
+    panel.style.display = 'flex';
+
+    checks.innerHTML = layers.map((l, i) => `
+      <label title="${l.width}×${l.height} | scale ${(l.scaleX||1).toFixed(3)}×${(l.scaleY||1).toFixed(3)}">
+        <input type="checkbox" data-layer="${i}" ${l.visible ? 'checked' : ''} />
+        ${l.label}
+      </label>
+    `).join('');
+
+    checks.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const idx = parseInt(cb.dataset.layer);
+        viewer.setLayerVisible(idx, cb.checked);
+      });
+    });
+  }
+
+  // ── Event handlers ──────────────────────────────────────────────
   document.getElementById('btn-fit').addEventListener('click', () => {
     if (viewer) viewer.fitToViewport();
   });
@@ -184,14 +337,20 @@
   document.getElementById('btn-zoomout').addEventListener('click', () => {
     if (viewer) viewer.zoomTo(viewer.getState().zoom * 1.5);
   });
-
-  mapSelect.addEventListener('change', async () => {
-    await initViewer();
+  document.getElementById('btn-apply').addEventListener('click', async () => {
+    await applySelection();
   });
 
   // ── Bootstrap ──────────────────────────────────────────────────
-  await loadManifestList();
-  await initViewer();
+  allManifests = await loadManifestList();
+  renderManifestChecks();
+
+  // Auto-select first manifest as default and apply
+  if (allManifests.length > 0) {
+    selectedManifests.add(0);
+    renderManifestChecks();
+    await applySelection();
+  }
 </script>
 </body>
 </html>

@@ -5,9 +5,11 @@
 export class TileCache {
   /**
    * @param {number} [maxSize=256] - maximum number of tiles to store
+   * @param {string} [namespace=''] - optional prefix for keys (e.g. "L0") to isolate layer caches
    */
-  constructor(maxSize = 256) {
+  constructor(maxSize = 256, namespace = '') {
     this._maxSize = maxSize;
+    this._namespace = namespace;
     /** @type {Map<string, HTMLCanvasElement>} */
     this._store = new Map();
     /** Track access order for LRU (first = oldest, last = newest) */
@@ -22,7 +24,8 @@ export class TileCache {
    * @returns {string}
    */
   key(level, col, row) {
-    return `${level},${col},${row}`;
+    const base = `${level},${col},${row}`;
+    return this._namespace ? `${this._namespace}:${base}` : base;
   }
 
   /**
