@@ -54,9 +54,9 @@ npm run serve
 # → http://localhost:3000
 ```
 
-Alternatively, use `admin/pre-render.php` for a browser-based pre-render + upload workflow that rasterizes tiles client-side, compares tiles against their parent quadrant, and only uploads non-identical tiles. Identical tiles are **delegated** to the parent, saving storage and bandwidth.
+Alternatively, use `admin/pre-render.php` for a browser-based pre-render + upload workflow that rasterizes tiles client-side, detects solid-color tiles, and skips uploading them. Single-color tiles are stored as hex values in the manifest, saving storage and bandwidth.
 
-A tile debug overlay is available at `admin/debug-tiles.html` for visualizing which tiles exist per level with color-coded grid overlays and delegation highlighting.
+A tile debug overlay is available at `admin/debug-tiles.html` for visualizing which tiles exist per level with color-coded grid overlays. Single-color tiles are omitted from the overlay since they have no file on disk.
 
 ---
 
