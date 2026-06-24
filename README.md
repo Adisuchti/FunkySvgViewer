@@ -72,9 +72,11 @@ A tile debug overlay is available at `admin/debug-tiles.html` for visualizing wh
 | Server-side pre-rendered PNG tiles via manifest |
 | IndexedDB persistent tile cache |
 | Pre-render all tiles upfront (`preRenderAll`) |
-| Quadtree tile delegation — skips identical child tiles, stores delegation to parent |
+| Single-color tile detection — file-less tiles stored as hex colors in manifest, rendered synchronously with zero network requests |
+| WebP output support with configurable quality |
+| PNG palette quantization (≤256 colors) and configurable color bit depth |
 | C# parallel server-side pre-renderer (SkiaSharp) |
-| Browser-based smart pre-render + upload with delegation (admin panel) |
+| Browser-based smart pre-render + upload with single-color detection (admin panel) |
 | Tile debug overlay with per-level coloring (admin panel) |
 | Dynamic map switching via dropdown (fetches manifests server-side) |
 | Mouse drag to pan |
@@ -93,7 +95,7 @@ A tile debug overlay is available at `admin/debug-tiles.html` for visualizing wh
 
 - **No Worker rasterization** — heavy SVGs rasterize on the main thread via `requestAnimationFrame` batching. Large pyramids may cause jank during initial pre-rendering.
 - **No animated SVGs** — SMIL / CSS animations are not rendered (static raster only).
-- **Quadtree tile delegation** — identical child tiles are not stored; they reference the parent tile. This is mathematically safe: if a parent quadrant upscales pixel-perfect to the child, the child file is redundant. Delegation cascades recursively.
+- **Single-color tile detection** — tiles that are entirely one solid color are stored file-less as hex colors in the manifest, rendered synchronously on the client with no network request.
 - **No overlay API** — markers and custom elements on top of the SVG are planned.
 - **No TypeScript declarations** — plain JavaScript with JSDoc annotations.
 - **No inertia panning** — pan stops immediately on mouse/touch release.
@@ -170,6 +172,10 @@ node cli/pre-render.mjs Altis_Map.svg \
   --numLevels 6 \
   --lowestRes 4096 \
   --highestRes 40960
+
+# With format options:
+node cli/pre-render.mjs Altis_Map.svg --format webp --webpQuality 85
+node cli/pre-render.mjs Altis_Map.svg --format png --palette --bitdepth 4
 ```
 
 **Options:**
@@ -182,8 +188,12 @@ node cli/pre-render.mjs Altis_Map.svg \
 | `--highestRes=N` | Full-SVG pixel width at finest level | — |
 | `--outDir=PATH` | Output base directory | `./rasterizationData` |
 | `--maxCanvasDim=N` | Browser canvas cap for auto-level calculation | `4096` |
+| `--format=png\|webp` | Output image format | `png` |
+| `--webpQuality=N` | WebP quality 1–100 (WebP only) | `90` |
+| `--palette` | PNG palette quantization (≤256 colors) | — |
+| `--bitdepth=4\|2\|1` | Reduce color channel bit depth (PNG only) | — |
 
-**How it works:** Each pyramid level is rasterized once (full SVG at that level's resolution), then all tiles are extracted from that single render. Each tile is compared against the upscaled parent quadrant — if pixel-identical within 0.1% tolerance, the tile is skipped and a **delegation** entry is written to the manifest. Delegation cascades: if a parent is delegated, all 4 children auto-delegate to the grandparent without any rasterization.
+**How it works:** Each pyramid level is rasterized once (full SVG at that level's resolution), then all tiles are extracted from that single render. Each tile is scanned for single-color content — if every opaque pixel is identical, the tile is **not saved** to disk. Instead, its color is stored as a hex value in `manifest.json` under `singleColorTiles`. On the client, these tiles are rendered synchronously as solid-color canvases with zero network requests and zero disk space.
 
 Output structure:
 ```
@@ -206,9 +216,15 @@ dotnet run --project cli/PreRender -- Altis_Map.svg \
   --numLevels 6 \
   --lowestRes 4096 \
   --outDir ./rasterizationData
+
+# With format options:
+dotnet run --project cli/PreRender -- Altis_Map.svg --format webp --webpQuality 85
+dotnet run --project cli/PreRender -- Altis_Map.svg --format png --palette --bitdepth 4
 ```
 
-This uses the same quadtree pruning strategy with multi-threaded tile extraction and comparison for significantly faster processing on multi-core machines.
+Supports the same `--format`, `--webpQuality`, `--palette`, and `--bitdepth` flags as the Node.js CLI, and uses the same single-color tile detection strategy. See `example.txt` for ready-to-run command snippets.
+
+This uses single-color tile detection with multi-threaded tile extraction for significantly faster processing on multi-core machines.
 
 ### 2. Load pre-rendered tiles on the client
 
@@ -289,21 +305,43 @@ Zoom N: (2^N × 2^N) tiles
 
 Each level doubles the pixel density of the previous one. Levels are computed from `minLevel`, `numLevels`/`highestRes`/`lowestRes`, or auto-capped by `maxCanvasDim`.
 
-### Quadtree Tile Delegation
+### Single-Color Tile Detection
 
-When pre-rendering tiles, each tile is compared against the upscaled quadrant of its parent tile. If they are pixel-identical (within 0.1% tolerance), the child tile is **not saved**. Instead, a **delegation** entry is added to the manifest:
+During pre-rendering, every tile is scanned pixel-by-pixel. If all opaque pixels in a tile share the exact same RGBA value, the tile is classified as **single-color** and is **not written to disk**. Instead, its hex color is stored in the manifest:
 
 ```json
 {
-  "delegations": {
-    "L3-R7-C5": { "level": 2, "col": 3, "row": 2 }
+  "singleColorTiles": {
+    "L3-R7-C5": "#1a2b3cff",
+    "L4-R12-C9": "#00000000"
   }
 }
 ```
 
-This means tile `L3-R7-C5` is identical to tile `L2-R3-C2` — the client will display the parent tile instead. Delegation **cascades**: if parent `L2-R3-C2` is also delegated to `L0-R0-C0`, all 16 tiles at level 3 under that parent are automatically delegated to `L0-R0-C0` without any pixel comparison, saving significant compute time.
+This means tile `L3-R7-C5` is entirely solid `#1a2b3c` at full opacity — storing it as a file would waste disk space and bandwidth. Tiles with all-transparent pixels (e.g. `#00000000`) are also captured.
 
-On the client side, `PreRenderedLoader.isDelegated()` checks the manifest before attempting to fetch a tile. The `Renderer` skips fetch for delegated tiles and instead attempts to blit the delegated parent tile from the in-memory cache immediately — if the parent is cached, it is displayed right away. If the parent is not yet cached, its load is triggered proactively while a generic fallback is drawn. This is mathematically correct because a nearest-neighbor upscale preserves all pixel information.
+On the client side, `PreRenderedLoader.isSingleColor()` checks the manifest before attempting any network request. If a tile is single-color, the `Renderer` creates a solid-color `<canvas>` synchronously — no fetch, no decode, no cache lookup needed. This is materially faster than delegation because:
+
+- **Zero network requests** — no PNG/WebP file to download
+- **Zero disk I/O** — nothing to read from IndexedDB
+- **Instant rendering** — solid fill is a single `fillRect()` call
+- **No parent dependency** — doesn't require any parent tile to be loaded first
+
+The manifest also carries an `optimization` object recording which format options were used:
+
+```json
+{
+  "optimization": {
+    "format": "webp",
+    "webpQuality": 85,
+    "singleColorDetection": true
+  }
+}
+```
+
+### Manifest-Driven Cache Busting
+
+`PreRenderedLoader` derives a stable cache-busting token from key manifest fields (SVG name, tile size, levels, format, actualTileCount, singleColorCount). This token is appended as a query parameter (`?v=<hash>`) on all tile requests, ensuring browsers refetch tiles after re-generation even with aggressive caching headers. The token only changes when the manifest content changes.
 
 ---
 
